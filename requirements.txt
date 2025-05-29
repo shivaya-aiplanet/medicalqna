@@ -1,8 +1,7 @@
 streamlit
 langchain
-langchain-community
-langchain-huggingface
-qdrant-client
+langchain-qdrant
+langchain-litellm
 sentence-transformers
 litellm
 requests
@@ -10,4 +9,3 @@ duckduckgo-search
 beautifulsoup4
 lxml
 aiohttp
-asyncio
