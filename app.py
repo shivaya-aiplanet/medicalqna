@@ -1,5 +1,8 @@
 import streamlit as st
 import os
+import asyncio
+import aiohttp
+from concurrent.futures import ThreadPoolExecutor
 from langchain_community.chat_models import ChatLiteLLM
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Qdrant
@@ -7,9 +10,13 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
+from langchain_community.document_loaders import AsyncHtmlLoader
+from langchain_community.document_transformers import BeautifulSoupTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 import time
+from datetime import datetime
 
 # Page config
 st.set_page_config(
@@ -41,42 +48,138 @@ def setup_embeddings():
         encode_kwargs={'normalize_embeddings': True}
     )
 
-def create_medical_knowledge_base():
-    """Create a basic medical knowledge base"""
-    medical_docs = [
-        "Fever is a temporary increase in body temperature, often due to an illness. Normal body temperature is around 98.6°F (37°C). A fever is generally considered when temperature reaches 100.4°F (38°C) or higher.",
-        "Headaches can be caused by stress, dehydration, lack of sleep, or underlying medical conditions. Most headaches are not serious, but persistent or severe headaches should be evaluated by a healthcare professional.",
-        "High blood pressure (hypertension) is when blood pressure readings are consistently 130/80 mmHg or higher. It's often called the 'silent killer' because it usually has no symptoms.",
-        "Diabetes is a group of metabolic disorders characterized by high blood sugar levels. Type 1 diabetes is autoimmune, while Type 2 diabetes is often related to lifestyle factors.",
-        "Chest pain can range from minor to life-threatening. Cardiac chest pain may indicate heart attack and requires immediate medical attention. Other causes include muscle strain, acid reflux, or anxiety.",
-        "Shortness of breath (dyspnea) can be caused by heart conditions, lung diseases, anxiety, or physical exertion. Sudden onset of severe shortness of breath requires immediate medical evaluation.",
-        "Antibiotics are medications that fight bacterial infections. They do not work against viral infections like the common cold or flu. Overuse can lead to antibiotic resistance.",
-        "Aspirin is used for pain relief, fever reduction, and blood thinning. Low-dose aspirin may be prescribed for heart disease prevention, but should only be taken under medical supervision.",
-        "Depression is a mental health condition characterized by persistent sadness, loss of interest, and other symptoms that interfere with daily life. It's treatable with therapy, medication, or both.",
-        "Hypertension medications include ACE inhibitors, beta-blockers, diuretics, and calcium channel blockers. Each works differently to lower blood pressure and may have different side effects."
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def search_medical_web(query, max_results=5):
+    """Search web for medical information with caching"""
+    try:
+        # Initialize DuckDuckGo search
+        search = DuckDuckGoSearchAPIWrapper(max_results=max_results)
+        
+        # Add medical context to search query
+        medical_query = f"medical health {query} site:mayoclinic.org OR site:webmd.org OR site:healthline.com OR site:medlineplus.gov OR site:nih.gov"
+        
+        # Perform search
+        search_results = search.run(medical_query)
+        return search_results
+        
+    except Exception as e:
+        st.warning(f"Web search temporarily unavailable: {str(e)}")
+        return None
+
+def extract_urls_from_search(search_results):
+    """Extract URLs from search results"""
+    urls = []
+    if search_results:
+        # Simple URL extraction from DuckDuckGo results
+        lines = search_results.split('\n')
+        for line in lines:
+            if 'http' in line:
+                # Extract URL from the line
+                start = line.find('http')
+                if start != -1:
+                    end = line.find(' ', start)
+                    if end == -1:
+                        end = len(line)
+                    url = line[start:end].strip('.,)]')
+                    if url.endswith(('mayoclinic.org', 'webmd.com', 'healthline.com', 'medlineplus.gov', 'nih.gov')):
+                        urls.append(url)
+    return urls[:3]  # Limit to 3 URLs for speed
+
+async def fetch_web_content(urls):
+    """Asynchronously fetch content from medical websites"""
+    try:
+        # Load HTML content asynchronously
+        loader = AsyncHtmlLoader(urls)
+        docs = await asyncio.to_thread(loader.load)
+        
+        # Transform HTML to clean text
+        bs_transformer = BeautifulSoupTransformer()
+        docs_transformed = bs_transformer.transform_documents(
+            docs, 
+            tags_to_extract=["p", "h1", "h2", "h3", "li"]
+        )
+        
+        # Filter and clean content
+        medical_docs = []
+        for doc in docs_transformed:
+            if len(doc.page_content) > 100:  # Only keep substantial content
+                # Clean and truncate content
+                content = doc.page_content[:1500]  # Limit content length
+                medical_docs.append(Document(
+                    page_content=content,
+                    metadata={
+                        "source": doc.metadata.get("source", "web"),
+                        "type": "web_search",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                ))
+        
+        return medical_docs
+        
+    except Exception as e:
+        st.warning(f"Content extraction failed: {str(e)}")
+        return []
+
+def create_base_medical_knowledge():
+    """Create base medical knowledge for offline capability"""
+    base_knowledge = [
+        "Emergency symptoms requiring immediate medical attention include chest pain, difficulty breathing, severe bleeding, loss of consciousness, and signs of stroke.",
+        "Common vital signs include body temperature (98.6°F/37°C normal), blood pressure (120/80 mmHg normal), heart rate (60-100 bpm normal), and respiratory rate (12-20 breaths/min normal).",
+        "Medication safety guidelines: Always follow prescribed dosages, check for drug interactions, store medications properly, and consult healthcare providers before stopping treatments.",
+        "Preventive care recommendations include regular check-ups, vaccinations, cancer screenings, and lifestyle modifications for chronic disease prevention.",
+        "Mental health warning signs include persistent sadness, anxiety, changes in sleep or appetite, social withdrawal, and thoughts of self-harm requiring professional help."
     ]
     
-    documents = [Document(page_content=doc, metadata={"source": "medical_knowledge"}) for doc in medical_docs]
-    return documents
+    return [Document(
+        page_content=content, 
+        metadata={"source": "base_knowledge", "type": "offline"}
+    ) for content in base_knowledge]
 
-def setup_vector_store():
-    """Setup Qdrant vector store with medical knowledge"""
-    with st.spinner("🔄 Setting up medical knowledge base..."):
+def setup_hybrid_vector_store(query=None, enable_web_search=True):
+    """Setup vector store with both base knowledge and web search results"""
+    with st.spinner("🔄 Preparing medical knowledge base..."):
         try:
-            # Setup embeddings
             embeddings = setup_embeddings()
             
-            # Create medical documents
-            documents = create_medical_knowledge_base()
+            # Start with base medical knowledge
+            documents = create_base_medical_knowledge()
             
-            # Split documents
+            # Add web search results if enabled and query provided
+            if enable_web_search and query:
+                with st.spinner("🌐 Searching medical websites..."):
+                    # Search web for current medical information
+                    search_results = search_medical_web(query)
+                    
+                    if search_results:
+                        # Extract URLs from search results
+                        urls = extract_urls_from_search(search_results)
+                        
+                        if urls:
+                            # Fetch web content asynchronously
+                            try:
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                web_docs = loop.run_until_complete(fetch_web_content(urls))
+                                loop.close()
+                                
+                                if web_docs:
+                                    documents.extend(web_docs)
+                                    st.success(f"✅ Retrieved {len(web_docs)} medical web sources")
+                                else:
+                                    st.info("📚 Using offline medical knowledge")
+                            except Exception as e:
+                                st.warning("🔄 Using offline medical knowledge")
+                        else:
+                            st.info("📚 Using offline medical knowledge")
+            
+            # Split documents for better retrieval
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=50
+                chunk_size=800,
+                chunk_overlap=100
             )
             splits = text_splitter.split_documents(documents)
             
-            # Setup Qdrant client (in-memory for simplicity)
+            # Setup Qdrant client (in-memory for speed)
             client = QdrantClient(":memory:")
             
             # Create collection
@@ -98,58 +201,55 @@ def setup_vector_store():
             # Add documents
             vector_store.add_documents(splits)
             
-            return vector_store
+            return vector_store, len([d for d in documents if d.metadata.get("type") == "web_search"])
             
         except Exception as e:
-            st.error(f"Error setting up vector store: {str(e)}")
-            return None
+            st.error(f"Error setting up knowledge base: {str(e)}")
+            return None, 0
 
-def classify_user_context(user_type, urgency):
-    """Classify user context and urgency"""
-    context = {
-        "user_type": user_type,
-        "urgency": urgency,
-        "is_professional": user_type == "Healthcare Professional"
-    }
-    return context
-
-def create_qa_chain(vector_store, user_context):
-    """Create QA chain with medical prompt template"""
+def create_hybrid_qa_chain(vector_store, user_context, has_web_data=False):
+    """Create QA chain that combines LLM reasoning with retrieved knowledge"""
     llm = setup_llm()
     
-    # Create prompt template based on user context
+    # Enhanced prompt template for hybrid reasoning
     if user_context["is_professional"]:
-        template = """You are a medical AI assistant providing information to healthcare professionals.
-        
-Context: {context}
+        template = """You are an advanced medical AI assistant providing evidence-based information to healthcare professionals.
 
-Question: {question}
+Available Context: {context}
 
-Provide a detailed, evidence-based response including:
-1. Clinical information and differential diagnoses where relevant
-2. Current medical guidelines and recommendations
-3. Potential complications or considerations
-4. Confidence level in your response
+Medical Query: {question}
 
-Remember: This is for informational purposes only and should not replace clinical judgment.
+Instructions:
+1. Analyze the provided medical context from both clinical knowledge and current sources
+2. Provide detailed clinical information including differential diagnoses where relevant
+3. Include current medical guidelines and evidence-based recommendations
+4. Note any limitations in the available information
+5. Indicate confidence level and suggest additional clinical considerations
 
-Answer:"""
+""" + ("Note: This response includes current web-based medical information." if has_web_data else "Note: This response is based on general medical knowledge.") + """
+
+IMPORTANT: This information supports but does not replace clinical judgment and direct patient assessment.
+
+Clinical Response:"""
     else:
-        template = """You are a medical AI assistant providing information to patients and the general public.
+        template = """You are a helpful medical AI assistant providing reliable health information to patients and the general public.
 
-Context: {context}
+Available Information: {context}
 
-Question: {question}
+Health Question: {question}
 
-Provide a clear, understandable response including:
-1. Simple explanation of the condition or topic
-2. General recommendations and when to seek medical care
-3. Important safety information
-4. Confidence level in your response
+Instructions:
+1. Provide a clear, easy-to-understand explanation
+2. Include practical guidance and when to seek medical care
+3. Emphasize important safety considerations
+4. Be supportive while maintaining medical accuracy
+5. Indicate confidence level in the information provided
 
-IMPORTANT DISCLAIMER: This information is for educational purposes only and does not constitute medical advice. Always consult with a qualified healthcare professional for proper diagnosis and treatment.
+""" + ("Note: This includes current information from trusted medical websites." if has_web_data else "Note: This is based on general medical knowledge.") + """
 
-Answer:"""
+CRITICAL DISCLAIMER: This information is for educational purposes only and does not constitute medical advice. Always consult qualified healthcare professionals for proper diagnosis, treatment, and medical decisions.
+
+Response:"""
     
     prompt = PromptTemplate(
         template=template,
@@ -159,32 +259,48 @@ Answer:"""
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
+        retriever=vector_store.as_retriever(search_kwargs={"k": 5}),
         chain_type_kwargs={"prompt": prompt},
         return_source_documents=True
     )
     
     return qa_chain
 
-def generate_medical_response(question, user_context, qa_chain):
-    """Generate evidence-based medical response"""
-    with st.spinner("🔍 Searching medical knowledge base..."):
-        time.sleep(1)  # Simulate processing
-        
+def generate_hybrid_response(question, user_context, enable_web_search=True):
+    """Generate response using both LLM reasoning and web search"""
+    start_time = time.time()
+    
+    # Setup hybrid vector store
+    vector_store, web_sources_count = setup_hybrid_vector_store(
+        query=question if enable_web_search else None,
+        enable_web_search=enable_web_search
+    )
+    
+    if vector_store is None:
+        return None, 0, 0
+    
+    # Create QA chain
     with st.spinner("🧠 Analyzing medical information..."):
+        qa_chain = create_hybrid_qa_chain(vector_store, user_context, web_sources_count > 0)
+        
         try:
             result = qa_chain({"query": question})
-            return result
+            
+            end_time = time.time()
+            response_time = round((end_time - start_time) * 1000)  # Convert to milliseconds
+            
+            return result, web_sources_count, response_time
+            
         except Exception as e:
             st.error(f"Error generating response: {str(e)}")
-            return None
+            return None, 0, 0
 
 def main():
     # Header
     st.title("🏥 Medical Q&A Assistant")
-    st.markdown("*Providing evidence-based medical information with appropriate disclaimers*")
+    st.markdown("*Combining AI reasoning with real-time medical web search*")
     
-    # Sidebar for user context
+    # Sidebar for user context and settings
     with st.sidebar:
         st.header("👤 User Information")
         
@@ -201,28 +317,33 @@ def main():
         )
         
         st.markdown("---")
-        st.markdown("### ⚠️ Important Notice")
-        st.warning(
-            "This AI assistant provides general medical information only. "
-            "For emergencies, call emergency services immediately. "
-            "Always consult healthcare professionals for medical advice."
+        st.header("⚙️ Search Settings")
+        
+        enable_web_search = st.toggle(
+            "🌐 Enable Web Search",
+            value=True,
+            help="Include current medical information from trusted websites"
         )
-    
-    # Initialize vector store if not exists
-    if st.session_state.vector_store is None:
-        with st.spinner("🚀 Initializing medical knowledge base..."):
-            st.session_state.vector_store = setup_vector_store()
-            
-        if st.session_state.vector_store is None:
-            st.error("Failed to initialize the medical knowledge base. Please refresh the page.")
-            return
+        
+        if enable_web_search:
+            st.success("✅ Web search enabled")
+            st.caption("Sources: Mayo Clinic, WebMD, Healthline, MedlinePlus, NIH")
+        else:
+            st.info("📚 Using offline knowledge only")
+        
+        st.markdown("---")
+        st.markdown("### ⚠️ Important Notice")
+        st.error(
+            "🚨 **EMERGENCY:** For medical emergencies, call emergency services immediately. "
+            "This AI assistant provides general information only and does not replace professional medical care."
+        )
     
     # Main interface
     st.markdown("### 💬 Ask Your Medical Question")
     
     question = st.text_area(
         "Enter your medical question:",
-        placeholder="e.g., What are the symptoms of high blood pressure?",
+        placeholder="e.g., What are the latest treatments for type 2 diabetes?",
         height=100
     )
     
@@ -230,73 +351,102 @@ def main():
         if not question.strip():
             st.warning("Please enter a medical question.")
             return
-            
+        
         # Classify user context
-        user_context = classify_user_context(user_type, urgency)
+        user_context = {
+            "user_type": user_type,
+            "urgency": urgency,
+            "is_professional": user_type == "Healthcare Professional"
+        }
         
-        # Create QA chain
-        if st.session_state.qa_chain is None:
-            with st.spinner("⚙️ Setting up medical analysis system..."):
-                st.session_state.qa_chain = create_qa_chain(
-                    st.session_state.vector_store, 
-                    user_context
-                )
-        
-        # Generate response
-        result = generate_medical_response(
-            question, 
-            user_context, 
-            st.session_state.qa_chain
+        # Generate hybrid response
+        result, web_sources, response_time = generate_hybrid_response(
+            question, user_context, enable_web_search
         )
         
         if result:
             # Display response
             st.markdown("### 📋 Medical Information")
             
+            # Response metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("⚡ Response Time", f"{response_time}ms")
+            with col2:
+                st.metric("🌐 Web Sources", web_sources)
+            with col3:
+                st.metric("📊 Total Sources", len(result.get('source_documents', [])))
+            
             # Main answer
-            st.markdown("**Response:**")
+            st.markdown("**Medical Response:**")
             st.write(result['result'])
             
-            # Confidence and reliability
+            # Source analysis
             st.markdown("---")
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown("**📊 Reliability Level:**")
-                st.info("Based on general medical knowledge")
+                st.markdown("**📊 Information Quality:**")
+                if web_sources > 0:
+                    st.success(f"✅ Current information from {web_sources} trusted medical websites")
+                else:
+                    st.info("📚 Based on general medical knowledge")
                 
             with col2:
                 st.markdown("**👤 Response Type:**")
                 st.info(f"Tailored for: {user_type}")
             
-            # Source information
+            # Detailed sources
             if result.get('source_documents'):
-                with st.expander("📚 Knowledge Sources"):
+                with st.expander("📚 Knowledge Sources & Evidence"):
+                    web_sources_found = []
+                    offline_sources_found = []
+                    
                     for i, doc in enumerate(result['source_documents']):
-                        st.write(f"**Source {i+1}:** {doc.page_content[:200]}...")
+                        source_type = doc.metadata.get('type', 'unknown')
+                        if source_type == 'web_search':
+                            web_sources_found.append(doc)
+                        else:
+                            offline_sources_found.append(doc)
+                    
+                    if web_sources_found:
+                        st.markdown("**🌐 Current Web Sources:**")
+                        for i, doc in enumerate(web_sources_found):
+                            st.write(f"**Source {i+1}:** {doc.page_content[:300]}...")
+                            if 'source' in doc.metadata:
+                                st.caption(f"From: {doc.metadata['source']}")
+                    
+                    if offline_sources_found:
+                        st.markdown("**📚 Medical Knowledge Base:**")
+                        for i, doc in enumerate(offline_sources_found):
+                            st.write(f"**Reference {i+1}:** {doc.page_content[:200]}...")
             
-            # Related topics
+            # Related actions
             st.markdown("---")
-            st.markdown("**🔗 Related Topics to Explore:**")
-            related_topics = [
-                "Symptoms and diagnosis",
-                "Treatment options",
-                "Prevention strategies",
-                "When to seek medical care"
-            ]
+            st.markdown("**🔗 Recommended Next Steps:**")
             
-            cols = st.columns(len(related_topics))
-            for i, topic in enumerate(related_topics):
-                with cols[i]:
-                    if st.button(topic, key=f"related_{i}"):
-                        st.info(f"Consider asking about: {topic.lower()} related to your condition")
+            action_cols = st.columns(4)
+            with action_cols[0]:
+                if st.button("🩺 Symptoms", key="symptoms"):
+                    st.info("Consider asking about specific symptoms related to your condition")
+            with action_cols[1]:
+                if st.button("💊 Treatment", key="treatment"):
+                    st.info("Ask about treatment options and management strategies")
+            with action_cols[2]:
+                if st.button("🔬 Diagnosis", key="diagnosis"):
+                    st.info("Inquire about diagnostic procedures and tests")
+            with action_cols[3]:
+                if st.button("🏥 When to See Doctor", key="doctor"):
+                    st.info("Ask when professional medical consultation is needed")
             
-            # Final disclaimer
+            # Final comprehensive disclaimer
             st.markdown("---")
             st.error(
-                "⚠️ **MEDICAL DISCLAIMER:** This information is for educational purposes only. "
-                "It does not constitute medical advice, diagnosis, or treatment. "
-                "Always consult with qualified healthcare professionals for medical concerns."
+                "⚠️ **COMPREHENSIVE MEDICAL DISCLAIMER:** This AI assistant provides general medical information for educational purposes only. "
+                "It does not constitute professional medical advice, diagnosis, or treatment recommendations. "
+                "The information may not reflect the most current medical developments. "
+                "Always consult qualified healthcare professionals for medical concerns, treatment decisions, and health management. "
+                "In case of medical emergencies, contact emergency services immediately."
             )
 
 if __name__ == "__main__":
