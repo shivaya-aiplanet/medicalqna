@@ -1,9 +1,13 @@
 import streamlit as st
 import os
+import tempfile
 from langchain_community.chat_models import ChatLiteLLM
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain.schema import BaseOutputParser
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
 import time
 
 # Configure page
@@ -14,19 +18,72 @@ st.set_page_config(
 )
 
 # Initialize session state
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
+if 'knowledge_base' not in st.session_state:
+    st.session_state.knowledge_base = None
+if 'uploaded_file_name' not in st.session_state:
+    st.session_state.uploaded_file_name = None
 
-class MedicalResponseParser(BaseOutputParser):
-    """Custom parser for medical responses"""
-    
-    def parse(self, text: str) -> dict:
-        # Simple parsing - in production, you'd want more sophisticated parsing
-        return {
-            "answer": text,
-            "confidence": "Medium",  # Could be enhanced with actual confidence scoring
-            "sources": "Medical literature and clinical guidelines"
-        }
+def initialize_llm():
+    """Initialize LiteLLM with configuration"""
+    try:
+        api_key = st.secrets["LITELLM_API_KEY"]
+        base_url = st.secrets["LITELLM_BASE_URL"] 
+        model = st.secrets["LITELLM_MODEL"]
+        
+        os.environ['LITELLM_API_KEY'] = api_key
+        os.environ['LITELLM_BASE_URL'] = base_url
+        
+        llm = ChatLiteLLM(
+            model=model,
+            api_base=base_url,
+            api_key=api_key,
+            temperature=0.1,
+            max_tokens=1000
+        )
+        
+        return llm
+    except Exception as e:
+        st.error(f"Failed to initialize LLM: {str(e)}")
+        return None
+
+@st.cache_resource
+def load_embeddings():
+    """Load sentence transformer embeddings"""
+    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+def process_pdf(uploaded_file):
+    """Process uploaded PDF and create knowledge base"""
+    try:
+        with st.spinner("Processing PDF document..."):
+            # Save uploaded file temporarily
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_file_path = tmp_file.name
+            
+            # Load PDF
+            loader = PyPDFLoader(tmp_file_path)
+            documents = loader.load()
+            
+            # Split text into chunks
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200,
+                length_function=len
+            )
+            chunks = text_splitter.split_documents(documents)
+            
+            # Create embeddings and vector store
+            embeddings = load_embeddings()
+            knowledge_base = FAISS.from_documents(chunks, embeddings)
+            
+            # Clean up temporary file
+            os.unlink(tmp_file_path)
+            
+            return knowledge_base
+            
+    except Exception as e:
+        st.error(f"Error processing PDF: {str(e)}")
+        return None
 
 def classify_user_context(user_type, urgency):
     """Classify user context and urgency level"""
@@ -44,85 +101,77 @@ def classify_user_context(user_type, urgency):
     
     return context_map.get(user_type, "patient"), urgency_map.get(urgency, "routine_inquiry")
 
-def create_medical_prompt(query, user_context, urgency_level):
+def create_medical_prompt(user_context, urgency_level, has_knowledge_base=False):
     """Create context-aware medical prompt"""
     
     if user_context == "medical_professional":
-        system_prompt = """You are a medical information assistant designed to support healthcare professionals. 
-        Provide evidence-based, detailed medical information with clinical context. 
-        Include relevant medical terminology and cite general medical knowledge sources."""
+        base_prompt = """You are a medical information assistant designed to support healthcare professionals. 
+        Provide evidence-based, detailed medical information with clinical context."""
     else:
-        system_prompt = """You are a medical information assistant designed to provide general health information to patients.
-        Use clear, understandable language. Always emphasize the importance of consulting healthcare professionals.
-        Provide educational information but avoid specific medical advice."""
+        base_prompt = """You are a medical information assistant designed to provide general health information to patients.
+        Use clear, understandable language. Always emphasize the importance of consulting healthcare professionals."""
     
     if urgency_level == "urgent_medical_concern":
         urgency_note = "\n\nIMPORTANT: This appears to be an urgent medical concern. Strongly recommend immediate medical consultation."
     else:
         urgency_note = ""
     
-    template = ChatPromptTemplate.from_messages([
-        ("system", system_prompt + urgency_note),
-        ("human", "{query}")
-    ])
+    if has_knowledge_base:
+        context_instruction = """
+        Answer the question based on the provided context from the uploaded document. 
+        If the context doesn't contain relevant information, clearly state that the information is not available in the document.
+        
+        Context: {context}
+        
+        Question: {question}"""
+    else:
+        context_instruction = """
+        Answer the medical question based on your general medical knowledge. 
+        Provide accurate, evidence-based information.
+        
+        Question: {question}"""
     
-    return template
+    full_prompt = base_prompt + urgency_note + "\n\n" + context_instruction
+    
+    return ChatPromptTemplate.from_template(full_prompt)
 
-def initialize_llm():
-    """Initialize LiteLLM with configuration"""
-    try:
-        # Get credentials from Streamlit secrets
-        api_key = st.secrets["LITELLM_API_KEY"]
-        base_url = st.secrets["LITELLM_BASE_URL"] 
-        model = st.secrets["LITELLM_MODEL"]
-        
-        # Set environment variables for LiteLLM
-        os.environ['LITELLM_API_KEY'] = api_key
-        os.environ['LITELLM_BASE_URL'] = base_url
-        
-        # Initialize ChatLiteLLM
-        llm = ChatLiteLLM(
-            model=model,
-            api_base=base_url,
-            api_key=api_key,
-            temperature=0.1,  # Low temperature for medical accuracy
-            max_tokens=1000
-        )
-        
-        return llm
-    except Exception as e:
-        st.error(f"Failed to initialize LLM: {str(e)}")
-        return None
-
-def generate_medical_response(query, user_type, urgency):
-    """Generate evidence-based medical response"""
+def generate_response(query, user_type, urgency):
+    """Generate response with or without knowledge base"""
     
     llm = initialize_llm()
     if not llm:
         return None
     
-    # Classify user context
     user_context, urgency_level = classify_user_context(user_type, urgency)
     
-    # Create appropriate prompt
-    prompt_template = create_medical_prompt(query, user_context, urgency_level)
-    
     try:
-        # Generate response
-        formatted_prompt = prompt_template.format_messages(query=query)
-        response = llm.invoke(formatted_prompt)
+        if st.session_state.knowledge_base:
+            # Use knowledge base for retrieval
+            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=True)
+            
+            qa_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=st.session_state.knowledge_base.as_retriever(search_kwargs={"k": 3}),
+                chain_type_kwargs={"prompt": prompt_template}
+            )
+            
+            response = qa_chain.run(query)
+            
+        else:
+            # Use LLM directly without knowledge base
+            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=False)
+            formatted_prompt = prompt_template.format_messages(question=query)
+            response = llm.invoke(formatted_prompt)
+            response = response.content
         
-        # Parse response
-        parser = MedicalResponseParser()
-        parsed_response = parser.parse(response.content)
-        
-        return parsed_response
+        return response
         
     except Exception as e:
         st.error(f"Error generating response: {str(e)}")
         return None
 
-def add_medical_disclaimers(response, urgency_level):
+def add_medical_disclaimers(urgency_level):
     """Add appropriate medical disclaimers"""
     
     base_disclaimer = """
@@ -146,10 +195,34 @@ def main():
     
     # Header
     st.title("🏥 Medical Q&A Assistant")
-    st.markdown("*Evidence-based medical information support system*")
+    st.markdown("*Chat with medical documents or get general medical information*")
     
-    # Sidebar for user context
+    # Sidebar for document upload and user context
     with st.sidebar:
+        st.header("📄 Document Upload")
+        
+        uploaded_file = st.file_uploader(
+            "Upload a medical document (PDF)",
+            type="pdf",
+            help="Upload a medical document to chat with its content"
+        )
+        
+        if uploaded_file is not None:
+            if st.session_state.uploaded_file_name != uploaded_file.name:
+                st.session_state.knowledge_base = process_pdf(uploaded_file)
+                st.session_state.uploaded_file_name = uploaded_file.name
+                
+                if st.session_state.knowledge_base:
+                    st.success(f"✅ Document '{uploaded_file.name}' processed successfully!")
+                else:
+                    st.error("❌ Failed to process document")
+        
+        if st.button("Clear Document"):
+            st.session_state.knowledge_base = None
+            st.session_state.uploaded_file_name = None
+            st.success("Document cleared!")
+        
+        st.markdown("---")
         st.header("User Context")
         
         user_type = st.selectbox(
@@ -164,127 +237,53 @@ def main():
             help="How urgent is your medical question?"
         )
         
+        # Show current status
         st.markdown("---")
-        st.markdown("**Recent Questions:**")
-        
-        # Display recent questions from chat history
-        for i, chat in enumerate(st.session_state.chat_history[-3:]):
-            if st.button(f"Q: {chat['query'][:30]}...", key=f"recent_{i}"):
-                st.session_state.selected_query = chat['query']
+        st.header("Current Status")
+        if st.session_state.knowledge_base:
+            st.success(f"📄 Document loaded: {st.session_state.uploaded_file_name}")
+            st.info("Answers will be based on the uploaded document")
+        else:
+            st.info("💡 No document loaded - answers will be based on general medical knowledge")
     
-    # Main interface
-    col1, col2 = st.columns([2, 1])
+    # Main chat interface
+    st.subheader("💬 Ask Your Medical Question")
     
-    with col1:
-        st.subheader("Ask Your Medical Question")
-        
-        # Check if a recent question was selected
-        default_query = getattr(st.session_state, 'selected_query', '')
-        
-        query = st.text_area(
-            "Enter your medical question:",
-            value=default_query,
-            height=100,
-            placeholder="e.g., What are the symptoms of diabetes? How does aspirin work? Drug interactions with warfarin?"
-        )
-        
-        # Clear selected query after use
-        if hasattr(st.session_state, 'selected_query'):
-            del st.session_state.selected_query
-        
-        submit_button = st.button("Get Medical Information", type="primary")
+    query = st.text_area(
+        "Enter your medical question:",
+        height=100,
+        placeholder="e.g., What are the symptoms of diabetes? How does aspirin work? What does this test result mean?"
+    )
     
-    with col2:
-        st.subheader("Quick Examples")
-        example_queries = [
-            "Symptoms of hypertension",
-            "Side effects of ibuprofen", 
-            "Type 2 diabetes management",
-            "Common cold vs flu symptoms"
-        ]
+    if st.button("Get Answer", type="primary") and query.strip():
         
-        for example in example_queries:
-            if st.button(example, key=f"example_{example}"):
-                st.session_state.example_query = example
-                st.rerun()
-    
-    # Handle example query selection
-    if hasattr(st.session_state, 'example_query'):
-        query = st.session_state.example_query
-        submit_button = True
-        del st.session_state.example_query
-    
-    # Process query
-    if submit_button and query.strip():
-        
-        with st.spinner("🔍 Searching medical knowledge base..."):
-            time.sleep(1)  # Simulate processing time
-            
-            # Generate response
-            response = generate_medical_response(query, user_type, urgency)
+        with st.spinner("🔍 Generating response..."):
+            response = generate_response(query, user_type, urgency)
             
             if response:
-                # Display response
                 st.markdown("---")
-                st.subheader("📋 Medical Information")
+                st.subheader("📋 Answer")
                 
-                # Main answer
-                st.markdown("**Answer:**")
-                st.write(response["answer"])
-                
-                # Metadata
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**Confidence Level:** {response['confidence']}")
-                with col2:
-                    st.markdown(f"**Sources:** {response['sources']}")
+                # Display response
+                st.write(response)
                 
                 # Add disclaimers
                 user_context, urgency_level = classify_user_context(user_type, urgency)
-                disclaimer = add_medical_disclaimers(response, urgency_level)
+                disclaimer = add_medical_disclaimers(urgency_level)
                 st.markdown(disclaimer)
                 
-                # Related suggestions
-                st.markdown("**💡 You might also want to ask:**")
-                related_questions = [
-                    "What are the risk factors?",
-                    "When should I see a doctor?", 
-                    "Are there any preventive measures?",
-                    "What are the treatment options?"
-                ]
-                
-                cols = st.columns(2)
-                for i, question in enumerate(related_questions):
-                    with cols[i % 2]:
-                        if st.button(question, key=f"related_{i}"):
-                            st.session_state.related_query = f"{query} - {question}"
-                            st.rerun()
-                
-                # Save to chat history
-                st.session_state.chat_history.append({
-                    "query": query,
-                    "response": response,
-                    "user_type": user_type,
-                    "urgency": urgency,
-                    "timestamp": time.time()
-                })
-                
-                # Limit chat history size
-                if len(st.session_state.chat_history) > 10:
-                    st.session_state.chat_history = st.session_state.chat_history[-10:]
-    
-    # Handle related query selection
-    if hasattr(st.session_state, 'related_query'):
-        query = st.session_state.related_query
-        del st.session_state.related_query
-        st.rerun()
+                # Show source information
+                if st.session_state.knowledge_base:
+                    st.info(f"💡 Answer based on uploaded document: {st.session_state.uploaded_file_name}")
+                else:
+                    st.info("💡 Answer based on general medical knowledge")
     
     # Footer
     st.markdown("---")
     st.markdown(
         """
         <div style='text-align: center; color: gray;'>
-        <small>Medical Q&A Assistant | For educational purposes only | Always consult healthcare professionals</small>
+        <small>Medical Q&A Assistant | Upload documents for specific information or ask general medical questions</small>
         </div>
         """, 
         unsafe_allow_html=True
