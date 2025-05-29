@@ -26,6 +26,8 @@ if 'uploaded_file_name' not in st.session_state:
     st.session_state.uploaded_file_name = None
 if 'collection_name' not in st.session_state:
     st.session_state.collection_name = None
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
 
 def initialize_llm():
     """Initialize LiteLLM with configuration"""
@@ -82,7 +84,7 @@ def initialize_qdrant_client():
 def process_pdf_with_qdrant(uploaded_file):
     """Process uploaded PDF and create Qdrant vector store"""
     try:
-        with st.spinner("Processing PDF document..."):
+        with st.spinner("📄 Reading and analyzing your document... This may take a moment."):
             # Save uploaded file temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
@@ -247,16 +249,43 @@ def clear_vector_store():
         st.session_state.vector_store = None
         st.session_state.uploaded_file_name = None
         st.session_state.collection_name = None
+        st.session_state.chat_history = []
         
     except Exception as e:
         st.error(f"Error clearing vector store: {str(e)}")
+
+def display_chat_history():
+    """Display chat history"""
+    for i, chat in enumerate(st.session_state.chat_history):
+        with st.container():
+            st.markdown(f"**You:** {chat['question']}")
+            st.markdown(f"**Assistant:** {chat['answer']}")
+            if i < len(st.session_state.chat_history) - 1:
+                st.markdown("---")
+
+def get_suggested_questions():
+    """Get suggested questions based on document availability"""
+    if st.session_state.vector_store:
+        return [
+            "What is the main topic discussed in this document?",
+            "Can you summarize the key findings or recommendations?",
+            "What are the important symptoms or conditions mentioned?",
+            "Are there any treatment options or medications discussed?"
+        ]
+    else:
+        return [
+            "What are the common symptoms of diabetes?",
+            "How can I maintain good heart health?",
+            "What should I know about high blood pressure?",
+            "When should I see a doctor for persistent headaches?"
+        ]
 
 def main():
     """Main Streamlit application"""
     
     # Header
     st.title("🏥 Medical Q&A Assistant")
-    st.markdown("*Chat with medical documents using OpenAI embeddings and Qdrant vector database*")
+    st.markdown("*Get answers to your medical questions with AI-powered assistance*")
     
     # Sidebar for document upload and user context
     with st.sidebar:
@@ -265,7 +294,7 @@ def main():
         uploaded_file = st.file_uploader(
             "Upload a medical document (PDF)",
             type="pdf",
-            help="Upload a medical document to chat with its content using Qdrant vector search"
+            help="Upload a medical document to get specific answers from its content"
         )
         
         if uploaded_file is not None:
@@ -281,14 +310,13 @@ def main():
                     st.session_state.vector_store = vector_store
                     st.session_state.uploaded_file_name = uploaded_file.name
                     st.session_state.collection_name = collection_name
-                    st.success(f"✅ Document '{uploaded_file.name}' processed successfully!")
-                    st.info(f"📊 Collection: {collection_name}")
+                    st.success(f"✅ Document '{uploaded_file.name}' is ready for questions!")
                 else:
                     st.error("❌ Failed to process document")
         
         if st.button("Clear Document"):
             clear_vector_store()
-            st.success("Document and vector store cleared!")
+            st.success("Document cleared! Starting fresh.")
             st.rerun()
         
         st.markdown("---")
@@ -311,55 +339,85 @@ def main():
         st.header("Current Status")
         if st.session_state.vector_store:
             st.success(f"📄 Document: {st.session_state.uploaded_file_name}")
-            st.success(f"🔍 Vector DB: Qdrant Cloud")
-            st.success(f"🧠 Embeddings: Azure OpenAI")
-            st.info("Answers will be based on the uploaded document")
+            st.info("Answers will be based on your uploaded document")
         else:
             st.info("💡 No document loaded - answers will be based on general medical knowledge")
     
     # Main chat interface
     st.subheader("💬 Ask Your Medical Question")
     
-    query = st.text_area(
-        "Enter your medical question:",
-        height=100,
-        placeholder="e.g., What are the symptoms of diabetes? How does aspirin work? What does this test result mean?"
+    # Display chat history
+    if st.session_state.chat_history:
+        st.subheader("📝 Conversation History")
+        display_chat_history()
+        st.markdown("---")
+    
+    # Suggested questions
+    st.subheader("💡 Suggested Questions")
+    suggested_questions = get_suggested_questions()
+    
+    cols = st.columns(2)
+    for i, question in enumerate(suggested_questions):
+        with cols[i % 2]:
+            if st.button(question, key=f"suggestion_{i}", use_container_width=True):
+                with st.spinner("🤔 Thinking..."):
+                    response = generate_response(question, user_type, urgency)
+                    
+                    if response:
+                        # Add to chat history
+                        st.session_state.chat_history.append({
+                            'question': question,
+                            'answer': response
+                        })
+                        st.rerun()
+
+    st.markdown("---")
+    
+    # Custom question input
+    st.subheader("✍️ Ask Your Own Question")
+    query = st.text_input(
+        "Type your question here:",
+        placeholder="e.g., What are the side effects of this medication?"
     )
     
-    if st.button("Get Answer", type="primary") and query.strip():
-        
-        with st.spinner("🔍 Generating response..."):
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        ask_button = st.button("Ask", type="primary")
+    with col2:
+        if st.button("Clear Conversation"):
+            st.session_state.chat_history = []
+            st.rerun()
+    
+    if ask_button and query.strip():
+        with st.spinner("🤔 Thinking..."):
             response = generate_response(query, user_type, urgency)
             
             if response:
-                st.markdown("---")
-                st.subheader("📋 Answer")
-                
-                # Display response
-                st.write(response)
-                
-                # Add disclaimers
-                user_context, urgency_level = classify_user_context(user_type, urgency)
-                disclaimer = add_medical_disclaimers(urgency_level)
-                st.markdown(disclaimer)
-                
-                # Show source information
-                if st.session_state.vector_store:
-                    st.info(f"💡 Answer based on uploaded document: {st.session_state.uploaded_file_name}")
-                    st.info(f"🔍 Powered by: Qdrant Vector Search + Azure OpenAI Embeddings")
-                else:
-                    st.info("💡 Answer based on general medical knowledge")
+                # Add to chat history
+                st.session_state.chat_history.append({
+                    'question': query,
+                    'answer': response
+                })
+                st.rerun()
     
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style='text-align: center; color: gray;'>
-        <small>Medical Q&A Assistant | Powered by OpenAI Embeddings + Qdrant Vector Database</small>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+    # Show latest response with disclaimer
+    if st.session_state.chat_history:
+        latest_chat = st.session_state.chat_history[-1]
+        
+        st.markdown("---")
+        st.subheader("📋 Latest Answer")
+        st.write(latest_chat['answer'])
+        
+        # Add disclaimers
+        user_context, urgency_level = classify_user_context(user_type, urgency)
+        disclaimer = add_medical_disclaimers(urgency_level)
+        st.markdown(disclaimer)
+        
+        # Show source information
+        if st.session_state.vector_store:
+            st.info(f"💡 Answer based on your document: {st.session_state.uploaded_file_name}")
+        else:
+            st.info("💡 Answer based on general medical knowledge")
 
 if __name__ == "__main__":
     main()
