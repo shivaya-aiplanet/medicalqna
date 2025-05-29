@@ -298,7 +298,6 @@ def generate_hybrid_response(question, user_context, enable_web_search=True):
 def main():
     # Header
     st.title("🏥 Medical Q&A Assistant")
-    st.markdown("*Combining AI reasoning with real-time medical web search*")
     
     # Sidebar for user context and settings
     with st.sidebar:
@@ -308,12 +307,6 @@ def main():
             "I am a:",
             ["Patient/General Public", "Healthcare Professional"],
             help="This helps tailor the response appropriately"
-        )
-        
-        urgency = st.selectbox(
-            "Urgency Level:",
-            ["General Information", "Moderate Concern", "High Priority"],
-            help="Indicates the urgency of your medical question"
         )
         
         st.markdown("---")
@@ -351,11 +344,10 @@ def main():
         if not question.strip():
             st.warning("Please enter a medical question.")
             return
-        
+            
         # Classify user context
         user_context = {
             "user_type": user_type,
-            "urgency": urgency,
             "is_professional": user_type == "Healthcare Professional"
         }
         
@@ -395,31 +387,6 @@ def main():
             with col2:
                 st.markdown("**👤 Response Type:**")
                 st.info(f"Tailored for: {user_type}")
-            
-            # Detailed sources
-            if result.get('source_documents'):
-                with st.expander("📚 Knowledge Sources & Evidence"):
-                    web_sources_found = []
-                    offline_sources_found = []
-                    
-                    for i, doc in enumerate(result['source_documents']):
-                        source_type = doc.metadata.get('type', 'unknown')
-                        if source_type == 'web_search':
-                            web_sources_found.append(doc)
-                        else:
-                            offline_sources_found.append(doc)
-                    
-                    if web_sources_found:
-                        st.markdown("**🌐 Current Web Sources:**")
-                        for i, doc in enumerate(web_sources_found):
-                            st.write(f"**Source {i+1}:** {doc.page_content[:300]}...")
-                            if 'source' in doc.metadata:
-                                st.caption(f"From: {doc.metadata['source']}")
-                    
-                    if offline_sources_found:
-                        st.markdown("**📚 Medical Knowledge Base:**")
-                        for i, doc in enumerate(offline_sources_found):
-                            st.write(f"**Reference {i+1}:** {doc.page_content[:200]}...")
             
             # Related actions
             st.markdown("---")
