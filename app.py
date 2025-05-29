@@ -147,8 +147,8 @@ def classify_user_context(user_type, urgency):
     
     return context_map.get(user_type, "patient"), urgency_map.get(urgency, "routine_inquiry")
 
-def create_medical_prompt(user_context, urgency_level, has_knowledge_base=False):
-    """Create context-aware medical prompt"""
+def create_medical_prompt(user_context, urgency_level, has_knowledge_base=False, chat_history=None):
+    """Create context-aware medical prompt with conversation history"""
     
     if user_context == "medical_professional":
         base_prompt = """You are a medical information assistant designed to support healthcare professionals. 
@@ -162,20 +162,30 @@ def create_medical_prompt(user_context, urgency_level, has_knowledge_base=False)
     else:
         urgency_note = ""
     
+    # Add conversation history context
+    history_context = ""
+    if chat_history and len(chat_history) > 0:
+        history_context = "\n\nPrevious conversation context:\n"
+        # Include last 3 exchanges for context
+        recent_history = chat_history[-3:] if len(chat_history) > 3 else chat_history
+        for chat in recent_history:
+            history_context += f"Q: {chat['question']}\nA: {chat['answer'][:200]}...\n\n"
+        history_context += "Use this conversation context to understand follow-up questions and provide relevant answers.\n"
+    
     if has_knowledge_base:
-        context_instruction = """
+        context_instruction = f"""
         Answer the question based on the provided context from the uploaded document. 
         If the context doesn't contain relevant information, clearly state that the information is not available in the document.
+        {history_context}
+        Context: {{context}}
         
-        Context: {context}
-        
-        Question: {question}"""
+        Question: {{question}}"""
     else:
-        context_instruction = """
+        context_instruction = f"""
         Answer the medical question based on your general medical knowledge. 
         Provide accurate, evidence-based information.
-        
-        Question: {question}"""
+        {history_context}
+        Question: {{question}}"""
     
     full_prompt = base_prompt + urgency_note + "\n\n" + context_instruction
     
