@@ -14,29 +14,135 @@ st.set_page_config(
     layout="wide"
 )
 
-# Basic CSS for UI
+# Custom CSS for modern UI
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
+
+    * {
+        font-family: 'Poppins', sans-serif;
+    }
+
+    /* Main app background */
+    .stApp {
+        background: linear-gradient(135deg, #f0f4f8 0%, #d9e2ec 100%);
+    }
+
+    /* Header styling */
     .header {
-        background: #667eea;
-        padding: 1rem;
-        border-radius: 8px;
+        background: linear-gradient(90deg, #6b48ff 0%, #00ddeb 100%);
+        padding: 2rem;
+        border-radius: 12px;
         color: white;
         text-align: center;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        margin-bottom: 2rem;
     }
+
+    .header h1 {
+        font-size: 2.5rem;
+        font-weight: 600;
+        margin: 0;
+    }
+
+    .header p {
+        font-size: 1.1rem;
+        font-weight: 300;
+        margin: 0.5rem 0 0;
+    }
+
+    /* Sidebar styling */
+    .css-1d391kg {
+        background: linear-gradient(180deg, #6b48ff 0%, #3b2a99 100%);
+        border-radius: 12px;
+        padding: 1rem;
+    }
+
+    .css-1d391kg h3 {
+        color: white;
+        font-weight: 600;
+    }
+
+    .css-1d391kg select {
+        background: #ffffff;
+        border-radius: 8px;
+        padding: 0.5rem;
+        border: none;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Main content styling */
+    .content-box {
+        background: white;
+        padding: 2rem;
+        border-radius: 12px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        margin: 1rem 0;
+    }
+
+    .content-box h3 {
+        font-weight: 600;
+        color: #333;
+        margin-bottom: 1rem;
+    }
+
+    /* Response box */
     .response-box {
         background: #f8f9fa;
-        padding: 1rem;
-        border-radius: 8px;
+        padding: 1.5rem;
+        border-radius: 10px;
         border: 1px solid #e1e5e9;
         margin: 1rem 0;
     }
+
+    /* Disclaimer */
     .disclaimer {
         background: #fff5f5;
         padding: 1rem;
-        border-radius: 8px;
+        border-radius: 10px;
         border: 1px solid #fed7d7;
+        color: #721c24;
+        font-weight: 400;
     }
+
+    /* Query history item */
+    .history-item {
+        background: #f8f9fa;
+        padding: 0.75rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+        border-left: 4px solid #6b48ff;
+        color: white;
+    }
+
+    /* Input styling */
+    .stTextInput > div > div > input {
+        border-radius: 8px;
+        border: 1px solid #d1d5db;
+        padding: 0.75rem;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+    }
+
+    /* Button styling */
+    .stButton > button {
+        background: #6b48ff;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.75rem 1.5rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+
+    .stButton > button:hover {
+        background: #5439cc;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    }
+
+    /* Remove Streamlit's default branding */
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -127,7 +233,7 @@ def main():
     st.markdown("""
     <div class="header">
         <h1>🩺 MedAssist AI</h1>
-        <p>Medical Information Assistant</p>
+        <p>Your Modern Medical Information Assistant</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -148,13 +254,14 @@ def main():
         if st.session_state.query_history:
             for query_data in reversed(st.session_state.query_history[-3:]):
                 st.markdown(f"""
-                <div style="background: #f8f9fa; padding: 0.5rem; border-radius: 5px; margin: 0.5rem 0;">
+                <div class="history-item">
                     <small>{query_data['timestamp']}</small><br>
                     <strong>{query_data['query'][:50]}...</strong>
                 </div>
                 """, unsafe_allow_html=True)
 
     # Main content
+    st.markdown('<div class="content-box">', unsafe_allow_html=True)
     st.markdown("### 💬 Ask a Medical Question")
     query = st.text_input(
         "Enter your question:",
@@ -183,6 +290,7 @@ def main():
                 })
         else:
             st.warning("Please enter a question.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
