@@ -1,13 +1,15 @@
 import streamlit as st
 import os
 import tempfile
+import uuid
 from langchain_community.chat_models import ChatLiteLLM
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_openai import AzureOpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
 from langchain.chains import RetrievalQA
+from qdrant_client import QdrantClient
 import time
 
 # Configure page
@@ -18,10 +20,12 @@ st.set_page_config(
 )
 
 # Initialize session state
-if 'knowledge_base' not in st.session_state:
-    st.session_state.knowledge_base = None
+if 'vector_store' not in st.session_state:
+    st.session_state.vector_store = None
 if 'uploaded_file_name' not in st.session_state:
     st.session_state.uploaded_file_name = None
+if 'collection_name' not in st.session_state:
+    st.session_state.collection_name = None
 
 def initialize_llm():
     """Initialize LiteLLM with configuration"""
@@ -47,12 +51,36 @@ def initialize_llm():
         return None
 
 @st.cache_resource
-def load_embeddings():
-    """Load sentence transformer embeddings"""
-    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+def initialize_embeddings():
+    """Initialize Azure OpenAI embeddings"""
+    try:
+        embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=st.secrets["AZURE_DEPLOYMENT"],
+            openai_api_version=st.secrets["OPENAI_API_VERSION"],
+            azure_endpoint=st.secrets["AZURE_OPENAI_ENDPOINT"],
+            api_key=st.secrets["OPENAI_API_KEY"]
+        )
+        return embeddings
+    except Exception as e:
+        st.error(f"Failed to initialize embeddings: {str(e)}")
+        return None
 
-def process_pdf(uploaded_file):
-    """Process uploaded PDF and create knowledge base"""
+@st.cache_resource
+def initialize_qdrant_client():
+    """Initialize Qdrant client"""
+    try:
+        client = QdrantClient(
+            url=st.secrets["QDRANT_URL"],
+            api_key=st.secrets["QDRANT_API_KEY"],
+            prefer_grpc=True
+        )
+        return client
+    except Exception as e:
+        st.error(f"Failed to initialize Qdrant client: {str(e)}")
+        return None
+
+def process_pdf_with_qdrant(uploaded_file):
+    """Process uploaded PDF and create Qdrant vector store"""
     try:
         with st.spinner("Processing PDF document..."):
             # Save uploaded file temporarily
@@ -72,18 +100,34 @@ def process_pdf(uploaded_file):
             )
             chunks = text_splitter.split_documents(documents)
             
-            # Create embeddings and vector store
-            embeddings = load_embeddings()
-            knowledge_base = FAISS.from_documents(chunks, embeddings)
+            # Initialize embeddings and Qdrant client
+            embeddings = initialize_embeddings()
+            qdrant_client = initialize_qdrant_client()
+            
+            if not embeddings or not qdrant_client:
+                return None, None
+            
+            # Create unique collection name
+            collection_name = f"medical_docs_{uuid.uuid4().hex[:8]}"
+            
+            # Create vector store
+            vector_store = QdrantVectorStore.from_documents(
+                documents=chunks,
+                embedding=embeddings,
+                url=st.secrets["QDRANT_URL"],
+                api_key=st.secrets["QDRANT_API_KEY"],
+                collection_name=collection_name,
+                prefer_grpc=True
+            )
             
             # Clean up temporary file
             os.unlink(tmp_file_path)
             
-            return knowledge_base
+            return vector_store, collection_name
             
     except Exception as e:
         st.error(f"Error processing PDF: {str(e)}")
-        return None
+        return None, None
 
 def classify_user_context(user_type, urgency):
     """Classify user context and urgency level"""
@@ -145,14 +189,14 @@ def generate_response(query, user_type, urgency):
     user_context, urgency_level = classify_user_context(user_type, urgency)
     
     try:
-        if st.session_state.knowledge_base:
-            # Use knowledge base for retrieval
+        if st.session_state.vector_store:
+            # Use Qdrant vector store for retrieval
             prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=True)
             
             qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
                 chain_type="stuff",
-                retriever=st.session_state.knowledge_base.as_retriever(search_kwargs={"k": 3}),
+                retriever=st.session_state.vector_store.as_retriever(search_kwargs={"k": 3}),
                 chain_type_kwargs={"prompt": prompt_template}
             )
             
@@ -190,12 +234,29 @@ def add_medical_disclaimers(urgency_level):
     
     return base_disclaimer
 
+def clear_vector_store():
+    """Clear the current vector store and collection"""
+    try:
+        if st.session_state.collection_name:
+            qdrant_client = initialize_qdrant_client()
+            if qdrant_client:
+                # Delete the collection from Qdrant
+                qdrant_client.delete_collection(st.session_state.collection_name)
+        
+        # Clear session state
+        st.session_state.vector_store = None
+        st.session_state.uploaded_file_name = None
+        st.session_state.collection_name = None
+        
+    except Exception as e:
+        st.error(f"Error clearing vector store: {str(e)}")
+
 def main():
     """Main Streamlit application"""
     
     # Header
     st.title("🏥 Medical Q&A Assistant")
-    st.markdown("*Chat with medical documents or get general medical information*")
+    st.markdown("*Chat with medical documents using OpenAI embeddings and Qdrant vector database*")
     
     # Sidebar for document upload and user context
     with st.sidebar:
@@ -204,23 +265,31 @@ def main():
         uploaded_file = st.file_uploader(
             "Upload a medical document (PDF)",
             type="pdf",
-            help="Upload a medical document to chat with its content"
+            help="Upload a medical document to chat with its content using Qdrant vector search"
         )
         
         if uploaded_file is not None:
             if st.session_state.uploaded_file_name != uploaded_file.name:
-                st.session_state.knowledge_base = process_pdf(uploaded_file)
-                st.session_state.uploaded_file_name = uploaded_file.name
+                # Clear previous vector store
+                if st.session_state.vector_store:
+                    clear_vector_store()
                 
-                if st.session_state.knowledge_base:
+                # Process new document
+                vector_store, collection_name = process_pdf_with_qdrant(uploaded_file)
+                
+                if vector_store and collection_name:
+                    st.session_state.vector_store = vector_store
+                    st.session_state.uploaded_file_name = uploaded_file.name
+                    st.session_state.collection_name = collection_name
                     st.success(f"✅ Document '{uploaded_file.name}' processed successfully!")
+                    st.info(f"📊 Collection: {collection_name}")
                 else:
                     st.error("❌ Failed to process document")
         
         if st.button("Clear Document"):
-            st.session_state.knowledge_base = None
-            st.session_state.uploaded_file_name = None
-            st.success("Document cleared!")
+            clear_vector_store()
+            st.success("Document and vector store cleared!")
+            st.rerun()
         
         st.markdown("---")
         st.header("User Context")
@@ -240,8 +309,10 @@ def main():
         # Show current status
         st.markdown("---")
         st.header("Current Status")
-        if st.session_state.knowledge_base:
-            st.success(f"📄 Document loaded: {st.session_state.uploaded_file_name}")
+        if st.session_state.vector_store:
+            st.success(f"📄 Document: {st.session_state.uploaded_file_name}")
+            st.success(f"🔍 Vector DB: Qdrant Cloud")
+            st.success(f"🧠 Embeddings: Azure OpenAI")
             st.info("Answers will be based on the uploaded document")
         else:
             st.info("💡 No document loaded - answers will be based on general medical knowledge")
@@ -273,8 +344,9 @@ def main():
                 st.markdown(disclaimer)
                 
                 # Show source information
-                if st.session_state.knowledge_base:
+                if st.session_state.vector_store:
                     st.info(f"💡 Answer based on uploaded document: {st.session_state.uploaded_file_name}")
+                    st.info(f"🔍 Powered by: Qdrant Vector Search + Azure OpenAI Embeddings")
                 else:
                     st.info("💡 Answer based on general medical knowledge")
     
@@ -283,7 +355,7 @@ def main():
     st.markdown(
         """
         <div style='text-align: center; color: gray;'>
-        <small>Medical Q&A Assistant | Upload documents for specific information or ask general medical questions</small>
+        <small>Medical Q&A Assistant | Powered by OpenAI Embeddings + Qdrant Vector Database</small>
         </div>
         """, 
         unsafe_allow_html=True
