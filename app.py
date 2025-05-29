@@ -292,24 +292,33 @@ st.markdown("""
 
 class MedicalChatbot:
     def __init__(self):
-        # Set litellm environment variables
-        os.environ["LITELLM_API_KEY"] = st.secrets["LITELLM_API_KEY"]
-        os.environ["LITELLM_BASE_URL"] = st.secrets["LITELLM_BASE_URL"]
-        self.model = st.secrets["LITELLM_MODEL"]
-        
-        # Initialize Hugging Face embeddings
-        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Initialize vector store with enhanced medical knowledge
-        self.vector_store = self._initialize_vector_store()
-        
-        # Conversation context and personality
-        self.personality = {
-            "empathetic": True,
-            "supportive": True,
-            "professional": True,
-            "caring": True
-        }
+        try:
+            # Set litellm environment variables
+            required_secrets = ["LITELLM_API_KEY", "LITELLM_BASE_URL", "LITELLM_MODEL"]
+            for secret in required_secrets:
+                if secret not in st.secrets:
+                    raise ValueError(f"Missing required secret: {secret}")
+            
+            os.environ["LITELLM_API_KEY"] = st.secrets["LITELLM_API_KEY"]
+            os.environ["LITELLM_BASE_URL"] = st.secrets["LITELLM_BASE_URL"]
+            self.model = st.secrets["LITELLM_MODEL"]
+            
+            # Initialize Hugging Face embeddings
+            self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+            
+            # Initialize vector store with enhanced medical knowledge
+            self.vector_store = self._initialize_vector_store()
+            
+            # Conversation context and personality
+            self.personality = {
+                "empathetic": True,
+                "supportive": True,
+                "professional": True,
+                "caring": True
+            }
+        except Exception as e:
+            st.error(f"Error initializing MedicalChatbot: {str(e)}")
+            raise
 
     def _initialize_medical_knowledge(self):
         """Enhanced medical knowledge base with more comprehensive information"""
@@ -411,28 +420,39 @@ class MedicalChatbot:
 
     def generate_empathetic_response(self, query: str, user_type: str, conversation_history: list, user_mood: dict):
         """Generate empathetic response using RAG with conversation memory"""
-        # Retrieve relevant information
-        relevant_docs = self.retrieve_relevant_info(query, conversation_history)
-        context = "\n".join(relevant_docs)
-        
-        # Build conversation context
-        conversation_context = ""
-        if conversation_history:
-            recent_history = conversation_history[-4:]  # Last 4 exchanges
-            conversation_context = "\n".join([
-                f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
-                for msg in recent_history
-            ])
+        try:
+            # Validate inputs
+            if not query or not isinstance(query, str):
+                raise ValueError("Invalid query provided")
+            if not user_type or not isinstance(user_type, str):
+                raise ValueError("Invalid user type provided")
+            if not isinstance(conversation_history, list):
+                raise ValueError("Invalid conversation history format")
+            if not isinstance(user_mood, dict) or 'mood' not in user_mood:
+                raise ValueError("Invalid user mood format")
 
-        # Create empathetic system prompt based on mood
-        empathy_instructions = {
-            "worried": "The user seems worried or anxious. Be extra reassuring, acknowledge their concerns, and provide calm, supportive guidance.",
-            "in_pain": "The user appears to be in pain or discomfort. Show compassion, validate their experience, and provide helpful information with care.",
-            "sad": "The user seems sad or down. Be particularly supportive, encouraging, and gentle in your response.",
-            "neutral": "Maintain a warm, caring, and professional tone while being helpful and informative."
-        }
+            # Retrieve relevant information
+            relevant_docs = self.retrieve_relevant_info(query, conversation_history)
+            context = "\n".join(relevant_docs)
+            
+            # Build conversation context
+            conversation_context = ""
+            if conversation_history:
+                recent_history = conversation_history[-4:]  # Last 4 exchanges
+                conversation_context = "\n".join([
+                    f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+                    for msg in recent_history
+                ])
 
-        system_prompt = f"""You are MedAssist AI, a caring and empathetic medical information assistant. You have a warm, compassionate personality and truly care about helping people with their health concerns.
+            # Create empathetic system prompt based on mood
+            empathy_instructions = {
+                "worried": "The user seems worried or anxious. Be extra reassuring, acknowledge their concerns, and provide calm, supportive guidance.",
+                "in_pain": "The user appears to be in pain or discomfort. Show compassion, validate their experience, and provide helpful information with care.",
+                "sad": "The user seems sad or down. Be particularly supportive, encouraging, and gentle in your response.",
+                "neutral": "Maintain a warm, caring, and professional tone while being helpful and informative."
+            }
+
+            system_prompt = f"""You are MedAssist AI, a caring and empathetic medical information assistant. You have a warm, compassionate personality and truly care about helping people with their health concerns.
 
 PERSONALITY TRAITS:
 - Deeply empathetic and understanding
@@ -466,8 +486,7 @@ INSTRUCTIONS:
 Current user message: {query}
 
 Respond with empathy, care, and helpful medical information."""
-        
-        try:
+            
             response = completion(
                 model=self.model,
                 api_base=st.secrets["LITELLM_BASE_URL"],
@@ -480,52 +499,109 @@ Respond with empathy, care, and helpful medical information."""
                 max_tokens=1200
             )
             
+            if not response or not response.choices:
+                raise ValueError("Empty response from API")
+                
             answer = response.choices[0].message.content
             return {"answer": answer, "mood_detected": user_mood}
             
         except Exception as e:
-            return {"error": str(e)}
+            error_msg = f"Error generating response: {str(e)}"
+            st.error(error_msg)
+            return {"error": error_msg}
 
 def initialize_session_state():
-    """Initialize session state for chatbot"""
-    if 'conversation_history' not in st.session_state:
+    """Initialize session state for chatbot with proper error handling"""
+    try:
+        # Initialize core session state variables
+        if 'conversation_history' not in st.session_state:
+            st.session_state.conversation_history = []
+        if 'chatbot' not in st.session_state:
+            st.session_state.chatbot = MedicalChatbot()
+        if 'user_mood_history' not in st.session_state:
+            st.session_state.user_mood_history = []
+        if 'conversation_started' not in st.session_state:
+            st.session_state.conversation_started = False
+        if 'typing' not in st.session_state:
+            st.session_state.typing = False
+        if 'session_start' not in st.session_state:
+            st.session_state.session_start = datetime.now()
+        if 'last_error' not in st.session_state:
+            st.session_state.last_error = None
+            
+        # Validate session state
+        if not isinstance(st.session_state.conversation_history, list):
+            st.session_state.conversation_history = []
+        if not isinstance(st.session_state.user_mood_history, list):
+            st.session_state.user_mood_history = []
+        if not isinstance(st.session_state.session_start, datetime):
+            st.session_state.session_start = datetime.now()
+            
+    except Exception as e:
+        st.error(f"Error initializing session state: {str(e)}")
+        # Reset session state to safe defaults
+        st.session_state.clear()
         st.session_state.conversation_history = []
-    if 'chatbot' not in st.session_state:
-        st.session_state.chatbot = MedicalChatbot()
-    if 'user_mood_history' not in st.session_state:
         st.session_state.user_mood_history = []
-    if 'conversation_started' not in st.session_state:
         st.session_state.conversation_started = False
-    if 'typing' not in st.session_state:
         st.session_state.typing = False
+        st.session_state.session_start = datetime.now()
+        st.session_state.last_error = str(e)
 
 def display_message(role: str, content: str, timestamp: str = None, mood: dict = None):
-    """Display a message in the chat interface"""
-    if timestamp is None:
-        timestamp = datetime.now().strftime("%H:%M")
-    
-    if role == "user":
-        st.markdown(f"""
-        <div class="user-message">
-            {content}
-            <div style="font-size: 0.8em; opacity: 0.7; margin-top: 0.5rem;">
-                {timestamp} {mood['emoji'] if mood else ''}
+    """Display a message in the chat interface with proper validation and error handling"""
+    try:
+        # Validate inputs
+        if not role or not isinstance(role, str):
+            raise ValueError("Invalid message role")
+        if not content or not isinstance(content, str):
+            raise ValueError("Invalid message content")
+        
+        # Set default timestamp if none provided
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%H:%M")
+        elif not isinstance(timestamp, str):
+            timestamp = datetime.now().strftime("%H:%M")
+            
+        # Validate mood data
+        mood_emoji = ""
+        if mood and isinstance(mood, dict) and 'emoji' in mood:
+            mood_emoji = mood['emoji']
+        
+        # Generate appropriate message HTML based on role
+        if role == "user":
+            st.markdown(f"""
+            <div class="user-message">
+                {content}
+                <div style="font-size: 0.8em; opacity: 0.7; margin-top: 0.5rem;">
+                    {timestamp} {mood_emoji}
+                </div>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
-    elif role == "assistant":
-        st.markdown(f"""
-        <div class="bot-message">
-            {content}
-            <div style="font-size: 0.8em; opacity: 0.7; margin-top: 0.5rem;">
-                🩺 MedAssist • {timestamp}
+            """, unsafe_allow_html=True)
+        elif role == "assistant":
+            st.markdown(f"""
+            <div class="bot-message">
+                {content}
+                <div style="font-size: 0.8em; opacity: 0.7; margin-top: 0.5rem;">
+                    🩺 MedAssist • {timestamp}
+                </div>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
-    elif role == "system":
+            """, unsafe_allow_html=True)
+        elif role == "system":
+            st.markdown(f"""
+            <div class="system-message">
+                {content}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            raise ValueError(f"Invalid message role: {role}")
+            
+    except Exception as e:
+        st.error(f"Error displaying message: {str(e)}")
+        # Display a fallback message
         st.markdown(f"""
         <div class="system-message">
-            {content}
+            Error displaying message. Please try again.
         </div>
         """, unsafe_allow_html=True)
 
@@ -543,23 +619,53 @@ def display_typing_indicator():
     """, unsafe_allow_html=True)
 
 def get_conversation_stats():
-    """Calculate conversation statistics"""
-    total_messages = len(st.session_state.conversation_history)
-    user_messages = len([msg for msg in st.session_state.conversation_history if msg['role'] == 'user'])
-    
-    mood_counts = {}
-    for mood_data in st.session_state.user_mood_history:
-        mood = mood_data['mood']
-        mood_counts[mood] = mood_counts.get(mood, 0) + 1
-    
-    dominant_mood = max(mood_counts.items(), key=lambda x: x[1])[0] if mood_counts else "neutral"
-    
-    return {
-        "total_messages": total_messages,
-        "user_messages": user_messages,
-        "dominant_mood": dominant_mood,
-        "session_start": st.session_state.get('session_start', datetime.now())
-    }
+    """Calculate conversation statistics with proper error handling"""
+    try:
+        # Initialize default stats
+        stats = {
+            "total_messages": 0,
+            "user_messages": 0,
+            "dominant_mood": "neutral",
+            "session_start": datetime.now()
+        }
+        
+        # Get conversation history
+        conversation_history = st.session_state.get('conversation_history', [])
+        if not isinstance(conversation_history, list):
+            conversation_history = []
+            
+        # Calculate message counts
+        stats["total_messages"] = len(conversation_history)
+        stats["user_messages"] = len([msg for msg in conversation_history if msg.get('role') == 'user'])
+        
+        # Calculate mood statistics
+        mood_history = st.session_state.get('user_mood_history', [])
+        if isinstance(mood_history, list):
+            mood_counts = {}
+            for mood_data in mood_history:
+                if isinstance(mood_data, dict) and 'mood' in mood_data:
+                    mood = mood_data['mood']
+                    mood_counts[mood] = mood_counts.get(mood, 0) + 1
+            
+            if mood_counts:
+                stats["dominant_mood"] = max(mood_counts.items(), key=lambda x: x[1])[0]
+        
+        # Get session start time
+        session_start = st.session_state.get('session_start')
+        if isinstance(session_start, datetime):
+            stats["session_start"] = session_start
+            
+        return stats
+        
+    except Exception as e:
+        st.error(f"Error calculating conversation stats: {str(e)}")
+        # Return default stats
+        return {
+            "total_messages": 0,
+            "user_messages": 0,
+            "dominant_mood": "neutral",
+            "session_start": datetime.now()
+        }
 
 def main():
     initialize_session_state()
