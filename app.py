@@ -112,13 +112,15 @@ st.markdown("""
 class MedicalKnowledgeBase:
     def __init__(self):
         try:
-            # Check if CUDA is available, otherwise use CPU
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            self.model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+            # Initialize model without device first
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            # Then move to device if CUDA is available
+            if torch.cuda.is_available():
+                self.model = self.model.to('cuda')
         except Exception as e:
             st.error(f"Error initializing model: {str(e)}")
             # Fallback to CPU if there's an error
-            self.model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
         self.knowledge_base = self._initialize_medical_knowledge()
         
     def _initialize_medical_knowledge(self):
