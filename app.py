@@ -2,9 +2,10 @@ import streamlit as st
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
-from openai import AzureOpenAI
+from litellm import completion
 from datetime import datetime
 import pandas as pd
+import os
 
 # Page config
 st.set_page_config(
@@ -41,15 +42,13 @@ st.markdown("""
 
 class MedicalRAGSystem:
     def __init__(self):
-        # Initialize Azure OpenAI client
-        self.client = AzureOpenAI(
-            api_key=st.secrets["AZURE_API_KEY"],
-            api_version=st.secrets["AZURE_API_VERSION"],
-            azure_endpoint=st.secrets["AZURE_ENDPOINT"]
-        )
+        # Set litellm environment variables
+        os.environ["LITELLM_API_KEY"] = st.secrets["LITELLM_API_KEY"]
+        os.environ["LITELLM_BASE_URL"] = st.secrets["LITELLM_BASE_URL"]
+        self.model = st.secrets["LITELLM_MODEL"]
         # Initialize Hugging Face embeddings
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        # Initialize knowledge base and vector store
+        # Initialize vector store
         self.vector_store = self._initialize_vector_store()
 
     def _initialize_knowledge_base(self):
@@ -82,7 +81,7 @@ class MedicalRAGSystem:
         return [doc.page_content for doc in docs]
 
     def generate_response(self, query: str, user_type: str):
-        """Generate response using RAG"""
+        """Generate response using RAG with litellm"""
         # Retrieve relevant information
         relevant_docs = self.retrieve_relevant_info(query)
         context = "\n".join(relevant_docs)
@@ -96,8 +95,10 @@ Always include a disclaimer to consult a healthcare professional. Answer the que
         
         try:
             with st.spinner("Processing your query..."):
-                response = self.client.chat.completions.create(
-                    model=st.secrets["MODEL_NAME"],
+                response = completion(
+                    model=self.model,
+                    api_base=st.secrets["LITELLM_BASE_URL"],
+                    api_key=st.secrets["LITELLM_API_KEY"],
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": query}
