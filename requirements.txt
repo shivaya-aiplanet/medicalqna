@@ -1,6 +1,8 @@
-streamlit 
-langchain 
-langchain-community 
-sentence-transformers 
-faiss-cpu 
+streamlit
+langchain
+langchain-community
+langchain-huggingface
+qdrant-client
+sentence-transformers
 litellm
+requests
