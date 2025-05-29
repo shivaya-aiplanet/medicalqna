@@ -1,623 +1,555 @@
 import streamlit as st
-import os
-import time
-import tempfile
-from pathlib import Path
-from typing import List, Dict, Any
-import plotly.express as px
-import plotly.graph_objects as go
+import openai
+from openai import AzureOpenAI
+import pandas as pd
 from datetime import datetime
+import time
 import json
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import pickle
+import os
+from typing import List, Dict, Any
+import re
 
-# Langchain imports
-from langchain_community.document_loaders import PyPDFDirectoryLoader, PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
-from langchain_openai import AzureChatOpenAI
-from langchain.chains import RetrievalQA
-from langchain.schema.runnable import RunnablePassthrough
-from langchain.schema.output_parser import StrOutputParser
-from langchain.prompts import ChatPromptTemplate
-from langchain_community.vectorstores import FAISS
-
-# Page configuration
+# Page config
 st.set_page_config(
-    page_title="🏥 MedAssist AI - Your Medical Q&A Companion",
-    page_icon="🏥",
+    page_title="MedAssist AI - Medical Q&A Assistant",
+    page_icon="🩺",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for enhanced UI
+# Custom CSS for better UI
 st.markdown("""
 <style>
-    /* Main theme colors */
-    :root {
-        --primary-color: #2E86AB;
-        --secondary-color: #A23B72;
-        --accent-color: #F18F01;
-        --success-color: #C73E1D;
-    }
-    
-    /* Hide default Streamlit elements */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    /* Custom header */
     .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
         padding: 2rem;
-        border-radius: 15px;
-        text-align: center;
+        border-radius: 10px;
         margin-bottom: 2rem;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-    }
-    
-    .main-header h1 {
-        color: white;
-        font-size: 3rem;
-        font-weight: 700;
-        margin-bottom: 0.5rem;
-        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-    }
-    
-    .main-header p {
-        color: #E8F4FD;
-        font-size: 1.2rem;
-        margin: 0;
-    }
-    
-    /* Chat interface styling */
-    .chat-container {
-        background: linear-gradient(145deg, #f0f8ff, #ffffff);
-        border-radius: 15px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-        margin-bottom: 2rem;
-    }
-    
-    .user-message {
-        background: linear-gradient(135deg, #667eea, #764ba2);
-        color: white;
-        padding: 1rem 1.5rem;
-        border-radius: 20px 20px 5px 20px;
-        margin: 1rem 0;
-        box-shadow: 0 2px 10px rgba(102, 126, 234, 0.3);
-        float: right;
-        clear: both;
-        max-width: 80%;
-    }
-    
-    .assistant-message {
-        background: linear-gradient(135deg, #ffecd2, #fcb69f);
-        color: #333;
-        padding: 1rem 1.5rem;
-        border-radius: 20px 20px 20px 5px;
-        margin: 1rem 0;
-        box-shadow: 0 2px 10px rgba(252, 182, 159, 0.3);
-        float: left;
-        clear: both;
-        max-width: 80%;
-    }
-    
-    /* Metrics cards */
-    .metric-card {
-        background: linear-gradient(145deg, #ffffff, #f8fafc);
-        border-radius: 12px;
-        padding: 1.5rem;
         text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
-        border-left: 4px solid var(--primary-color);
-        transition: transform 0.3s ease;
-    }
-    
-    .metric-card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 8px 25px rgba(0,0,0,0.1);
-    }
-    
-    .metric-value {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: var(--primary-color);
-        margin-bottom: 0.5rem;
-    }
-    
-    .metric-label {
-        font-size: 1rem;
-        color: #64748b;
-        font-weight: 500;
-    }
-    
-    /* Sidebar styling */
-    .sidebar-content {
-        background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
-        border-radius: 15px;
-        padding: 1.5rem;
         color: white;
+    }
+    
+    .user-type-card {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 5px solid #667eea;
         margin-bottom: 1rem;
     }
     
-    /* Status indicators */
-    .status-ready {
-        background: linear-gradient(135deg, #56ab2f, #a8e6cf);
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 25px;
-        font-weight: 600;
-        text-align: center;
-    }
-    
-    .status-processing {
-        background: linear-gradient(135deg, #f093fb, #f5576c);
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 25px;
-        font-weight: 600;
-        text-align: center;
-    }
-    
-    /* File upload area */
-    .upload-area {
-        border: 2px dashed #667eea;
-        border-radius: 15px;
+    .medical-response {
+        background: #ffffff;
         padding: 2rem;
+        border-radius: 10px;
+        border: 1px solid #e1e5e9;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin: 1rem 0;
+    }
+    
+    .confidence-high {
+        background: #d4edda;
+        color: #155724;
+        padding: 0.5rem;
+        border-radius: 5px;
+        border-left: 4px solid #28a745;
+    }
+    
+    .confidence-medium {
+        background: #fff3cd;
+        color: #856404;
+        padding: 0.5rem;
+        border-radius: 5px;
+        border-left: 4px solid #ffc107;
+    }
+    
+    .confidence-low {
+        background: #f8d7da;
+        color: #721c24;
+        padding: 0.5rem;
+        border-radius: 5px;
+        border-left: 4px solid #dc3545;
+    }
+    
+    .disclaimer-box {
+        background: #fff5f5;
+        border: 2px solid #fed7d7;
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+    }
+    
+    .sidebar-section {
+        background: #f7fafc;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+    }
+    
+    .metric-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
-        background: linear-gradient(145deg, #f8fafc, #ffffff);
-        transition: all 0.3s ease;
+        margin: 0.5rem 0;
     }
     
-    .upload-area:hover {
-        border-color: #764ba2;
-        background: linear-gradient(145deg, #ffffff, #f8fafc);
-    }
-    
-    /* Button styling */
-    .stButton > button {
-        background: linear-gradient(135deg, #667eea, #764ba2);
-        color: white;
-        border: none;
-        border-radius: 25px;
-        padding: 0.7rem 2rem;
-        font-weight: 600;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
-    }
-    
-    /* Animation keyframes */
-    @keyframes pulse {
-        0% { opacity: 1; }
-        50% { opacity: 0.5; }
-        100% { opacity: 1; }
-    }
-    
-    .pulse {
-        animation: pulse 2s infinite;
+    .query-history {
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+        border-left: 3px solid #667eea;
     }
 </style>
 """, unsafe_allow_html=True)
 
-class MedicalQAApp:
+class MedicalKnowledgeBase:
     def __init__(self):
-        self.initialize_session_state()
-        self.setup_azure_llm()
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.knowledge_base = self._initialize_medical_knowledge()
         
-    def initialize_session_state(self):
-        """Initialize session state variables"""
-        if 'vectorstore' not in st.session_state:
-            st.session_state.vectorstore = None
-        if 'chat_history' not in st.session_state:
-            st.session_state.chat_history = []
-        if 'processing_complete' not in st.session_state:
-            st.session_state.processing_complete = False
-        if 'total_chunks' not in st.session_state:
-            st.session_state.total_chunks = 0
-        if 'document_stats' not in st.session_state:
-            st.session_state.document_stats = {}
+    def _initialize_medical_knowledge(self):
+        """Initialize with basic medical knowledge"""
+        return {
+            "symptoms": {
+                "fever": "Elevated body temperature, often indicating infection or inflammation",
+                "headache": "Pain in the head or upper neck region",
+                "chest_pain": "Discomfort in chest area, may indicate cardiac or pulmonary issues",
+                "shortness_of_breath": "Difficulty breathing, may indicate respiratory or cardiac problems"
+            },
+            "treatments": {
+                "antibiotics": "Medications used to treat bacterial infections",
+                "analgesics": "Pain-relieving medications",
+                "anti_inflammatory": "Medications that reduce inflammation"
+            },
+            "drug_interactions": {
+                "warfarin": "Blood thinner with multiple drug interactions",
+                "aspirin": "May interact with blood thinners and certain medications"
+            }
+        }
+    
+    def search_knowledge(self, query: str, top_k: int = 3) -> List[Dict]:
+        """Search medical knowledge base"""
+        results = []
+        query_lower = query.lower()
+        
+        for category, items in self.knowledge_base.items():
+            for item, description in items.items():
+                if any(word in item.lower() or word in description.lower() 
+                      for word in query_lower.split()):
+                    results.append({
+                        "category": category,
+                        "item": item,
+                        "description": description,
+                        "relevance": 0.8
+                    })
+        
+        return results[:top_k]
+
+class MedicalQASystem:
+    def __init__(self):
+        self.client = AzureOpenAI(
+            api_key=st.secrets["AZURE_API_KEY"],
+            api_version=st.secrets["AZURE_API_VERSION"],
+            azure_endpoint=st.secrets["AZURE_ENDPOINT"]
+        )
+        self.knowledge_base = MedicalKnowledgeBase()
+        
+    def classify_query(self, query: str) -> Dict[str, Any]:
+        """Classify medical query type and urgency"""
+        urgency_keywords = {
+            "emergency": ["chest pain", "difficulty breathing", "severe pain", "bleeding", "unconscious"],
+            "urgent": ["fever", "infection", "pain", "rash"],
+            "routine": ["information", "general", "advice", "prevention"]
+        }
+        
+        query_lower = query.lower()
+        urgency = "routine"
+        
+        for level, keywords in urgency_keywords.items():
+            if any(keyword in query_lower for keyword in keywords):
+                urgency = level
+                break
+                
+        category = "general"
+        if any(word in query_lower for word in ["symptom", "pain", "fever", "headache"]):
+            category = "symptoms"
+        elif any(word in query_lower for word in ["treatment", "medication", "drug"]):
+            category = "treatment"
+        elif any(word in query_lower for word in ["interaction", "side effect"]):
+            category = "drug_interaction"
             
-    def setup_azure_llm(self):
-        """Setup Azure OpenAI LLM"""
+        return {
+            "category": category,
+            "urgency": urgency,
+            "confidence": 0.7
+        }
+    
+    def generate_medical_response(self, query: str, user_type: str, context: Dict) -> Dict[str, Any]:
+        """Generate comprehensive medical response"""
+        
+        # Search knowledge base
+        relevant_info = self.knowledge_base.search_knowledge(query)
+        
+        # Create context-aware prompt
+        system_prompt = self._create_system_prompt(user_type, context)
+        user_prompt = self._create_user_prompt(query, relevant_info, context)
+        
         try:
-            self.llm = AzureChatOpenAI(
-                azure_deployment=st.secrets["AZURE_DEPLOYMENT"],
-                azure_endpoint=st.secrets["AZURE_ENDPOINT"],
-                api_key=st.secrets["AZURE_API_KEY"],
-                api_version=st.secrets["AZURE_API_VERSION"],
-                temperature=0.3,
-                max_tokens=1000,
-            )
-        except Exception as e:
-            st.error(f"❌ Error setting up Azure OpenAI: {str(e)}")
-            st.stop()
-    
-    def create_enhanced_prompt(self):
-        """Create an enhanced medical Q&A prompt template"""
-        template = """
-        You are MedAssist AI, a highly knowledgeable medical AI assistant specializing in providing accurate, 
-        evidence-based health information. You have access to medical literature and documents to answer questions.
-
-        ## Your Role & Responsibilities:
-        - Provide clear, accurate medical information based on the provided context
-        - Use medical terminology appropriately while ensuring explanations are understandable
-        - Always emphasize when professional medical consultation is necessary
-        - Cite relevant information from the provided medical documents
-        - Maintain a professional, empathetic, and supportive tone
-
-        ## Guidelines:
-        1. **Accuracy First**: Base your responses on the provided medical context
-        2. **Safety Disclaimer**: Always remind users that this is for informational purposes only
-        3. **Professional Referral**: Encourage consultation with healthcare providers for diagnosis/treatment
-        4. **Clear Structure**: Organize responses with headings and bullet points when helpful
-        5. **Evidence-Based**: Reference the medical literature when possible
-
-        ## Context from Medical Documents:
-        {context}
-
-        ## User Question:
-        {question}
-
-        ## Response Format:
-        Provide a comprehensive answer that includes:
-        - Direct answer to the question
-        - Relevant medical details from the context
-        - Important considerations or warnings
-        - Recommendation to consult healthcare professionals
-
-        **Important Disclaimer**: This information is for educational purposes only and should not replace professional medical advice, diagnosis, or treatment.
-
-        Answer:
-        """
-        
-        return ChatPromptTemplate.from_template(template)
-    
-    def process_documents(self, uploaded_files):
-        """Process uploaded PDF documents with progress tracking"""
-        all_docs = []
-        
-        # Create progress containers
-        progress_container = st.container()
-        
-        with progress_container:
-            st.markdown("### 📄 Processing Documents...")
-            overall_progress = st.progress(0)
-            status_text = st.empty()
+            with st.spinner("🔍 Analyzing medical query and searching knowledge base..."):
+                response = self.client.chat.completions.create(
+                    model=st.secrets["MODEL_NAME"],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=1500
+                )
             
-            # Process each uploaded file
-            total_files = len(uploaded_files)
+            content = response.choices[0].message.content
             
-            for idx, uploaded_file in enumerate(uploaded_files):
-                status_text.markdown(f"**Processing:** {uploaded_file.name}")
-                
-                # Save uploaded file temporarily
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                    tmp_file.write(uploaded_file.read())
-                    tmp_file_path = tmp_file.name
-                
-                try:
-                    # Load PDF
-                    loader = PyPDFLoader(tmp_file_path)
-                    docs = loader.load()
-                    all_docs.extend(docs)
-                    
-                    # Update progress
-                    progress = (idx + 1) / total_files
-                    overall_progress.progress(progress)
-                    
-                except Exception as e:
-                    st.error(f"Error processing {uploaded_file.name}: {str(e)}")
-                finally:
-                    # Clean up temp file
-                    os.unlink(tmp_file_path)
+            # Extract structured response
+            structured_response = self._parse_response(content)
             
-            status_text.markdown("**Splitting documents into chunks...**")
-            
-            # Text splitting
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200,
-                length_function=len,
-                separators=["\n\n", "\n", " ", ""]
-            )
-            
-            chunks = text_splitter.split_documents(all_docs)
-            st.session_state.total_chunks = len(chunks)
-            
-            # Document statistics
-            st.session_state.document_stats = {
-                'total_documents': len(all_docs),
-                'total_chunks': len(chunks),
-                'total_files': total_files,
-                'processing_time': time.time()
+            return {
+                "answer": structured_response.get("answer", content),
+                "confidence": structured_response.get("confidence", "medium"),
+                "sources": structured_response.get("sources", []),
+                "related_topics": structured_response.get("related_topics", []),
+                "disclaimer": self._get_disclaimer(context["urgency"]),
+                "follow_up_questions": structured_response.get("follow_up", [])
             }
             
-            status_text.markdown("**Creating embeddings and vector store...**")
-            
-            # Create embeddings and vector store
-            with st.spinner("🧠 Creating intelligent embeddings..."):
-                embeddings = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2",
-                    model_kwargs={'device': 'cpu'}
-                )
-                
-                vectorstore = Chroma.from_documents(
-                    documents=chunks,
-                    embedding=embeddings,
-                    persist_directory=None
-                )
-                
-                st.session_state.vectorstore = vectorstore
-                st.session_state.processing_complete = True
-            
-            overall_progress.progress(1.0)
-            status_text.markdown("✅ **Processing Complete!**")
-            
-        return True
+        except Exception as e:
+            st.error(f"Error generating response: {str(e)}")
+            return {"error": str(e)}
     
-    def create_rag_chain(self):
-        """Create the RAG chain for question answering"""
-        if st.session_state.vectorstore is None:
-            return None
+    def _create_system_prompt(self, user_type: str, context: Dict) -> str:
+        """Create context-aware system prompt"""
+        base_prompt = """You are MedAssist AI, a medical information assistant designed to provide evidence-based, reliable medical information. 
+
+Your role is to:
+1. Provide accurate, evidence-based medical information
+2. Cite reliable medical sources when possible
+3. Indicate confidence levels in your responses
+4. Suggest follow-up questions for comprehensive care
+5. Always recommend professional medical consultation for diagnosis and treatment
+
+Response Format:
+- Provide clear, structured medical information
+- Include confidence level (high/medium/low)
+- List relevant sources or medical guidelines
+- Suggest related topics to explore
+- Provide appropriate follow-up questions
+
+Safety Guidelines:
+- Never provide specific diagnostic conclusions
+- Always recommend professional medical consultation
+- Indicate when immediate medical attention may be needed
+- Be clear about limitations of AI medical advice"""
+
+        if user_type == "Healthcare Professional":
+            base_prompt += "\n\nUser Context: Healthcare Professional - You may use more technical terminology and provide detailed clinical information."
+        else:
+            base_prompt += "\n\nUser Context: Patient/General Public - Use clear, accessible language and focus on general health education."
             
-        retriever = st.session_state.vectorstore.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": 5}
+        return base_prompt
+    
+    def _create_user_prompt(self, query: str, relevant_info: List, context: Dict) -> str:
+        """Create user prompt with context"""
+        prompt = f"""Medical Query: {query}
+
+Query Classification:
+- Category: {context.get('category', 'general')}
+- Urgency: {context.get('urgency', 'routine')}
+
+Relevant Knowledge Base Information:
+"""
+        
+        for info in relevant_info:
+            prompt += f"- {info['category']}: {info['item']} - {info['description']}\n"
+        
+        prompt += """
+Please provide a comprehensive medical response including:
+1. Evidence-based answer to the query
+2. Confidence level assessment
+3. Relevant medical sources or guidelines
+4. Related topics for further exploration
+5. Appropriate follow-up questions
+6. Any necessary warnings or recommendations for professional consultation
+"""
+        
+        return prompt
+    
+    def _parse_response(self, content: str) -> Dict[str, Any]:
+        """Parse structured response from LLM"""
+        # Simple parsing - in production, use more sophisticated NLP
+        lines = content.split('\n')
+        
+        response = {
+            "answer": content,
+            "confidence": "medium",
+            "sources": [],
+            "related_topics": [],
+            "follow_up": []
+        }
+        
+        # Extract confidence if mentioned
+        content_lower = content.lower()
+        if "high confidence" in content_lower or "very confident" in content_lower:
+            response["confidence"] = "high"
+        elif "low confidence" in content_lower or "uncertain" in content_lower:
+            response["confidence"] = "low"
+            
+        return response
+    
+    def _get_disclaimer(self, urgency: str) -> str:
+        """Get appropriate disclaimer based on urgency"""
+        base_disclaimer = "⚠️ **Medical Disclaimer**: This information is for educational purposes only and should not replace professional medical advice, diagnosis, or treatment."
+        
+        if urgency == "emergency":
+            return f"🚨 **URGENT**: {base_disclaimer} If this is a medical emergency, please contact emergency services immediately."
+        elif urgency == "urgent":
+            return f"⚡ **IMPORTANT**: {base_disclaimer} Please consult with a healthcare provider promptly."
+        else:
+            return f"{base_disclaimer} Always consult with qualified healthcare professionals for medical concerns."
+
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'query_history' not in st.session_state:
+        st.session_state.query_history = []
+    if 'qa_system' not in st.session_state:
+        st.session_state.qa_system = MedicalQASystem()
+    if 'total_queries' not in st.session_state:
+        st.session_state.total_queries = 0
+
+def main():
+    initialize_session_state()
+    
+    # Header
+    st.markdown("""
+    <div class="main-header">
+        <h1>🩺 MedAssist AI</h1>
+        <p>Your AI-Powered Medical Information Assistant</p>
+        <p><em>Evidence-based medical information at your fingertips</em></p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown("### 👤 User Profile")
+        
+        user_type = st.selectbox(
+            "Select your profile:",
+            ["Patient/General Public", "Healthcare Professional", "Medical Student"],
+            help="This helps customize the response complexity and terminology"
         )
         
-        prompt = self.create_enhanced_prompt()
-        
-        rag_chain = (
-            {"context": retriever, "question": RunnablePassthrough()}
-            | prompt
-            | self.llm
-            | StrOutputParser()
-        )
-        
-        return rag_chain
-    
-    def render_header(self):
-        """Render the main header"""
-        st.markdown("""
-        <div class="main-header">
-            <h1>🏥 MedAssist AI</h1>
-            <p>Your Intelligent Medical Q&A Companion - Powered by Advanced AI</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    def render_sidebar(self):
-        """Render the sidebar with controls and information"""
-        with st.sidebar:
-            st.markdown("""
-            <div class="sidebar-content">
-                <h2>🏥 MedAssist Control Panel</h2>
-                <p>Upload medical documents and get intelligent answers to your health questions.</p>
+        st.markdown("### 📊 Query Statistics")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <h3>{st.session_state.total_queries}</h3>
+                <p>Total Queries</p>
             </div>
             """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <h3>{len(st.session_state.query_history)}</h3>
+                <p>Session Queries</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Quick Actions
+        st.markdown("### ⚡ Quick Actions")
+        if st.button("🔄 Clear History"):
+            st.session_state.query_history = []
+            st.rerun()
             
-            # Document Upload Section
-            st.markdown("### 📁 Document Upload")
-            uploaded_files = st.file_uploader(
-                "Upload Medical PDFs",
-                type=['pdf'],
-                accept_multiple_files=True,
-                help="Upload medical documents, research papers, or health guides in PDF format."
-            )
-            
-            if uploaded_files and not st.session_state.processing_complete:
-                if st.button("🚀 Process Documents", type="primary", use_container_width=True):
-                    with st.spinner("Processing your medical documents..."):
-                        self.process_documents(uploaded_files)
-                        st.rerun()
-            
-            # System Status
-            st.markdown("### 📊 System Status")
-            if st.session_state.processing_complete:
-                st.markdown('<div class="status-ready">🟢 Ready for Questions</div>', 
-                           unsafe_allow_html=True)
-                
-                # Display statistics
-                stats = st.session_state.document_stats
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("📄 Documents", stats.get('total_documents', 0))
-                with col2:
-                    st.metric("🧩 Chunks", stats.get('total_chunks', 0))
-                    
-            else:
-                st.markdown('<div class="status-processing">⏳ Waiting for Documents</div>', 
-                           unsafe_allow_html=True)
-            
-            # Chat History Management
-            st.markdown("### 💬 Chat Management")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🗑️ Clear Chat", use_container_width=True):
-                    st.session_state.chat_history = []
-                    st.rerun()
-            with col2:
-                chat_count = len(st.session_state.chat_history)
-                st.metric("Messages", chat_count)
-            
-            # Quick Actions
-            st.markdown("### ⚡ Quick Questions")
-            quick_questions = [
-                "What is hypertension?",
-                "Symptoms of heart disease",
-                "How to prevent diabetes?",
-                "What is cholesterol?",
-                "Signs of a heart attack"
-            ]
-            
-            for question in quick_questions:
-                if st.button(f"💡 {question}", key=f"quick_{question}", use_container_width=True):
-                    st.session_state.current_question = question
-                    st.rerun()
+        if st.button("📁 Export History"):
+            if st.session_state.query_history:
+                history_df = pd.DataFrame(st.session_state.query_history)
+                csv = history_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv,
+                    file_name=f"medical_qa_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+        
+        # Recent Queries
+        if st.session_state.query_history:
+            st.markdown("### 📋 Recent Queries")
+            for i, query_data in enumerate(reversed(st.session_state.query_history[-5:])):
+                st.markdown(f"""
+                <div class="query-history">
+                    <small>{query_data['timestamp']}</small><br>
+                    <strong>{query_data['query'][:50]}...</strong>
+                </div>
+                """, unsafe_allow_html=True)
     
-    def render_chat_interface(self):
-        """Render the main chat interface"""
-        st.markdown("### 💬 Ask Your Medical Questions")
+    # Main content
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown("### 💬 Ask Your Medical Question")
         
-        # Display chat history
-        if st.session_state.chat_history:
-            st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-            for i, (question, answer) in enumerate(st.session_state.chat_history):
-                st.markdown(f"""
-                <div class="user-message">
-                    <strong>🙋‍♀️ You:</strong><br>{question}
-                </div>
-                """, unsafe_allow_html=True)
-                
-                st.markdown(f"""
-                <div class="assistant-message">
-                    <strong>🏥 MedAssist AI:</strong><br>{answer}
-                </div>
-                """, unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Question input
-        question = st.text_area(
+        # Query input
+        query = st.text_area(
             "Enter your medical question:",
+            placeholder="e.g., What are the common symptoms of hypertension?",
             height=100,
-            placeholder="e.g., What are the symptoms of high blood pressure?",
-            key="question_input"
+            help="Be as specific as possible for better results"
         )
         
-        # Handle quick questions
-        if hasattr(st.session_state, 'current_question'):
-            question = st.session_state.current_question
-            del st.session_state.current_question
-        
-        col1, col2, col3 = st.columns([2, 1, 1])
-        with col1:
-            ask_button = st.button("🤖 Ask MedAssist AI", type="primary", use_container_width=True)
-        with col2:
-            example_button = st.button("📋 Example Questions", use_container_width=True)
-        with col3:
-            help_button = st.button("❓ Help", use_container_width=True)
-        
-        if example_button:
-            st.info("""
-            **Example Medical Questions:**
-            - What are the risk factors for cardiovascular disease?
-            - How can I lower my cholesterol naturally?
-            - What is the difference between Type 1 and Type 2 diabetes?
-            - What are the warning signs of a stroke?
-            - How does exercise benefit heart health?
-            """)
-        
-        if help_button:
-            st.info("""
-            **How to use MedAssist AI:**
-            1. Upload medical PDF documents using the sidebar
-            2. Wait for processing to complete
-            3. Ask specific medical questions
-            4. Get evidence-based answers from your documents
+        # Additional context
+        with st.expander("➕ Additional Context (Optional)"):
+            age_range = st.selectbox(
+                "Age Range:",
+                ["Not specified", "0-12", "13-17", "18-30", "31-50", "51-70", "70+"]
+            )
             
-            **Remember:** This is for educational purposes only. Always consult healthcare professionals for medical advice.
-            """)
-        
-        # Process question
-        if ask_button and question and st.session_state.processing_complete:
-            with st.spinner("🧠 MedAssist AI is analyzing your question..."):
-                try:
-                    rag_chain = self.create_rag_chain()
-                    if rag_chain:
-                        response = rag_chain.invoke(question)
-                        
-                        # Add to chat history
-                        st.session_state.chat_history.append((question, response))
-                        
-                        # Clear the input
-                        st.session_state.question_input = ""
-                        st.rerun()
-                    else:
-                        st.error("❌ Unable to create the Q&A system. Please try again.")
-                except Exception as e:
-                    st.error(f"❌ Error processing question: {str(e)}")
-        
-        elif ask_button and question and not st.session_state.processing_complete:
-            st.warning("⚠️ Please upload and process medical documents first!")
-        
-        elif ask_button and not question:
-            st.warning("⚠️ Please enter a question!")
-    
-    def render_analytics_dashboard(self):
-        """Render analytics and insights dashboard"""
-        if not st.session_state.chat_history:
-            return
+            urgency = st.selectbox(
+                "Urgency Level:",
+                ["Routine Information", "Moderate Concern", "Urgent Concern"],
+                help="This helps prioritize and format the response appropriately"
+            )
             
-        st.markdown("### 📊 Chat Analytics")
+            additional_context = st.text_area(
+                "Additional Context:",
+                placeholder="Any relevant medical history, current medications, or specific concerns...",
+                height=60
+            )
         
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.markdown("""
-            <div class="metric-card">
-                <div class="metric-value">{}</div>
-                <div class="metric-label">Questions Asked</div>
-            </div>
-            """.format(len(st.session_state.chat_history)), unsafe_allow_html=True)
-        
-        with col2:
-            avg_length = sum(len(q) for q, _ in st.session_state.chat_history) / len(st.session_state.chat_history)
-            st.markdown("""
-            <div class="metric-card">
-                <div class="metric-value">{}</div>
-                <div class="metric-label">Avg Question Length</div>
-            </div>
-            """.format(int(avg_length)), unsafe_allow_html=True)
-        
-        with col3:
-            if st.session_state.document_stats:
-                st.markdown("""
-                <div class="metric-card">
-                    <div class="metric-value">{}</div>
-                    <div class="metric-label">Documents Processed</div>
-                </div>
-                """.format(st.session_state.document_stats.get('total_files', 0)), unsafe_allow_html=True)
-        
-        with col4:
-            st.markdown("""
-            <div class="metric-card">
-                <div class="metric-value">{}</div>
-                <div class="metric-label">Knowledge Chunks</div>
-            </div>
-            """.format(st.session_state.total_chunks), unsafe_allow_html=True)
+        # Submit button
+        if st.button("🔍 Get Medical Information", type="primary"):
+            if query.strip():
+                # Process query
+                context = {
+                    "user_type": user_type,
+                    "age_range": age_range,
+                    "urgency": urgency.lower().replace(" ", "_"),
+                    "additional_context": additional_context
+                }
+                
+                # Classify query
+                classification = st.session_state.qa_system.classify_query(query)
+                context.update(classification)
+                
+                # Generate response
+                with st.spinner("🧠 Processing your medical query..."):
+                    response = st.session_state.qa_system.generate_medical_response(
+                        query, user_type, context
+                    )
+                
+                if "error" not in response:
+                    # Display response
+                    st.markdown(f"""
+                    <div class="medical-response">
+                        <h3>📋 Medical Information Response</h3>
+                        {response['answer']}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Confidence indicator
+                    confidence = response.get('confidence', 'medium')
+                    confidence_class = f"confidence-{confidence}"
+                    confidence_emoji = {"high": "✅", "medium": "⚠️", "low": "❌"}
+                    
+                    st.markdown(f"""
+                    <div class="{confidence_class}">
+                        {confidence_emoji[confidence]} <strong>Confidence Level:</strong> {confidence.title()}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Related topics
+                    if response.get('related_topics'):
+                        st.markdown("**🔗 Related Topics:**")
+                        for topic in response['related_topics']:
+                            st.markdown(f"• {topic}")
+                    
+                    # Follow-up questions
+                    if response.get('follow_up_questions'):
+                        st.markdown("**❓ Suggested Follow-up Questions:**")
+                        for question in response['follow_up_questions']:
+                            if st.button(f"💭 {question}", key=f"followup_{hash(question)}"):
+                                st.session_state.temp_query = question
+                    
+                    # Disclaimer
+                    st.markdown(f"""
+                    <div class="disclaimer-box">
+                        {response['disclaimer']}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Save to history
+                    query_data = {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "query": query,
+                        "user_type": user_type,
+                        "response": response['answer'][:200] + "...",
+                        "confidence": confidence
+                    }
+                    st.session_state.query_history.append(query_data)
+                    st.session_state.total_queries += 1
+                
+            else:
+                st.warning("⚠️ Please enter a medical question to get started.")
     
-    def run(self):
-        """Main application runner"""
-        self.render_header()
-        self.render_sidebar()
+    with col2:
+        st.markdown("### 📚 Medical Resources")
         
-        # Main content area
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            self.render_chat_interface()
-        
-        with col2:
-            self.render_analytics_dashboard()
-        
-        # Footer
-        st.markdown("---")
         st.markdown("""
-        <div style="text-align: center; color: #64748b; padding: 2rem;">
-            <p><strong>🏥 MedAssist AI</strong> - Your trusted medical information companion</p>
-            <p style="font-size: 0.9rem;">
-                ⚠️ <strong>Medical Disclaimer:</strong> This application provides general health information for educational purposes only. 
-                It is not a substitute for professional medical advice, diagnosis, or treatment. Always seek the advice of your physician 
-                or other qualified health provider with any questions you may have regarding a medical condition.
-            </p>
+        <div class="user-type-card">
+            <h4>🏥 Emergency Resources</h4>
+            <p><strong>Emergency:</strong> 911 (US)</p>
+            <p><strong>Poison Control:</strong> 1-800-222-1222</p>
+            <p><strong>Crisis Hotline:</strong> 988</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        st.markdown("""
+        <div class="user-type-card">
+            <h4>🔬 Reliable Medical Sources</h4>
+            <ul>
+                <li>Mayo Clinic</li>
+                <li>WebMD</li>
+                <li>MedlinePlus</li>
+                <li>CDC Guidelines</li>
+                <li>WHO Resources</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+        <div class="user-type-card">
+            <h4>💡 Tips for Better Queries</h4>
+            <ul>
+                <li>Be specific about symptoms</li>
+                <li>Include duration and severity</li>
+                <li>Mention relevant medical history</li>
+                <li>Ask focused questions</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align: center; color: #666; padding: 1rem;">
+        <p>🩺 <strong>MedAssist AI</strong> - Built for healthcare education and information</p>
+        <p><em>Always consult healthcare professionals for medical advice, diagnosis, and treatment</em></p>
+    </div>
+    """, unsafe_allow_html=True)
 
-# Run the application
 if __name__ == "__main__":
-    app = MedicalQAApp()
-    app.run()
+    main()
