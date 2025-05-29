@@ -1,6 +1,11 @@
+
 streamlit
 langchain
 langchain-community
+langchain-openai
+langchain-qdrant
 litellm
 python-dotenv
-pypdf
+PyPDF2
+qdrant-client
+openai
