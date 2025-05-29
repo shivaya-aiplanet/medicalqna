@@ -1,945 +1,303 @@
 import streamlit as st
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
-from litellm import completion
-from datetime import datetime
-import pandas as pd
 import os
+from langchain_community.chat_models import ChatLiteLLM
+from langchain_huggingface.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Qdrant
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain.schema import Document
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
 import time
-import json
 
 # Page config
 st.set_page_config(
-    page_title="MedAssist AI - Your Caring Medical Companion",
-    page_icon="🩺",
+    page_title="Medical Q&A Assistant",
+    page_icon="🏥",
     layout="wide"
 )
 
-# Enhanced CSS for modern chatbot UI
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+# Initialize session state
+if 'vector_store' not in st.session_state:
+    st.session_state.vector_store = None
+if 'qa_chain' not in st.session_state:
+    st.session_state.qa_chain = None
 
-    * {
-        font-family: 'Inter', sans-serif;
-    }
+def setup_llm():
+    """Setup LiteLLM with API credentials"""
+    return ChatLiteLLM(
+        model=st.secrets["LITELLM_MODEL"],
+        api_base=st.secrets["LITELLM_BASE_URL"],
+        api_key=st.secrets["LITELLM_API_KEY"],
+        temperature=0.1
+    )
 
-    /* Main app background */
-    .stApp {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        min-height: 100vh;
-    }
+def setup_embeddings():
+    """Setup HuggingFace embeddings"""
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True}
+    )
 
-    /* Header styling */
-    .chat-header {
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(10px);
-        padding: 1.5rem 2rem;
-        border-radius: 20px;
-        color: #2d3748;
-        text-align: center;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-        margin-bottom: 1.5rem;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    }
+def create_medical_knowledge_base():
+    """Create a basic medical knowledge base"""
+    medical_docs = [
+        "Fever is a temporary increase in body temperature, often due to an illness. Normal body temperature is around 98.6°F (37°C). A fever is generally considered when temperature reaches 100.4°F (38°C) or higher.",
+        "Headaches can be caused by stress, dehydration, lack of sleep, or underlying medical conditions. Most headaches are not serious, but persistent or severe headaches should be evaluated by a healthcare professional.",
+        "High blood pressure (hypertension) is when blood pressure readings are consistently 130/80 mmHg or higher. It's often called the 'silent killer' because it usually has no symptoms.",
+        "Diabetes is a group of metabolic disorders characterized by high blood sugar levels. Type 1 diabetes is autoimmune, while Type 2 diabetes is often related to lifestyle factors.",
+        "Chest pain can range from minor to life-threatening. Cardiac chest pain may indicate heart attack and requires immediate medical attention. Other causes include muscle strain, acid reflux, or anxiety.",
+        "Shortness of breath (dyspnea) can be caused by heart conditions, lung diseases, anxiety, or physical exertion. Sudden onset of severe shortness of breath requires immediate medical evaluation.",
+        "Antibiotics are medications that fight bacterial infections. They do not work against viral infections like the common cold or flu. Overuse can lead to antibiotic resistance.",
+        "Aspirin is used for pain relief, fever reduction, and blood thinning. Low-dose aspirin may be prescribed for heart disease prevention, but should only be taken under medical supervision.",
+        "Depression is a mental health condition characterized by persistent sadness, loss of interest, and other symptoms that interfere with daily life. It's treatable with therapy, medication, or both.",
+        "Hypertension medications include ACE inhibitors, beta-blockers, diuretics, and calcium channel blockers. Each works differently to lower blood pressure and may have different side effects."
+    ]
+    
+    documents = [Document(page_content=doc, metadata={"source": "medical_knowledge"}) for doc in medical_docs]
+    return documents
 
-    .chat-header h1 {
-        font-size: 2.2rem;
-        font-weight: 700;
-        margin: 0;
-        background: linear-gradient(45deg, #667eea, #764ba2);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-
-    .chat-header p {
-        font-size: 1rem;
-        font-weight: 400;
-        margin: 0.5rem 0 0;
-        color: #718096;
-    }
-
-    /* Chat container */
-    .chat-container {
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(10px);
-        border-radius: 20px;
-        padding: 1.5rem;
-        margin: 1rem 0;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        max-height: 500px;
-        overflow-y: auto;
-    }
-
-    /* Message styling */
-    .user-message {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 1rem 1.5rem;
-        border-radius: 20px 20px 5px 20px;
-        margin: 0.5rem 0 0.5rem auto;
-        max-width: 80%;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-        animation: slideInRight 0.3s ease-out;
-    }
-
-    .bot-message {
-        background: rgba(247, 250, 252, 0.9);
-        color: #2d3748;
-        padding: 1rem 1.5rem;
-        border-radius: 20px 20px 20px 5px;
-        margin: 0.5rem auto 0.5rem 0;
-        max-width: 85%;
-        border-left: 4px solid #667eea;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
-        animation: slideInLeft 0.3s ease-out;
-    }
-
-    .system-message {
-        background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
-        color: white;
-        padding: 0.8rem 1.2rem;
-        border-radius: 15px;
-        margin: 0.5rem auto;
-        text-align: center;
-        font-size: 0.9rem;
-        box-shadow: 0 4px 15px rgba(72, 187, 120, 0.3);
-        animation: fadeIn 0.5s ease-out;
-    }
-
-    .typing-indicator {
-        background: rgba(247, 250, 252, 0.9);
-        padding: 1rem 1.5rem;
-        border-radius: 20px 20px 20px 5px;
-        margin: 0.5rem auto 0.5rem 0;
-        max-width: 85%;
-        border-left: 4px solid #667eea;
-        animation: pulse 1.5s infinite;
-    }
-
-    .typing-dots {
-        display: inline-block;
-    }
-
-    .typing-dots span {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background-color: #667eea;
-        margin: 0 2px;
-        animation: typing 1.4s infinite ease-in-out;
-    }
-
-    .typing-dots span:nth-child(1) { animation-delay: -0.32s; }
-    .typing-dots span:nth-child(2) { animation-delay: -0.16s; }
-    .typing-dots span:nth-child(3) { animation-delay: 0s; }
-
-    @keyframes typing {
-        0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
-        40% { transform: scale(1.2); opacity: 1; }
-    }
-
-    @keyframes slideInRight {
-        from { transform: translateX(100%); opacity: 0; }
-        to { transform: translateX(0); opacity: 1; }
-    }
-
-    @keyframes slideInLeft {
-        from { transform: translateX(-100%); opacity: 0; }
-        to { transform: translateX(0); opacity: 1; }
-    }
-
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-
-    @keyframes pulse {
-        0%, 100% { opacity: 0.8; }
-        50% { opacity: 1; }
-    }
-
-    /* Input area styling */
-    .input-container {
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(10px);
-        border-radius: 20px;
-        padding: 1.5rem;
-        margin: 1rem 0;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    }
-
-    /* Sidebar styling */
-    .css-1d391kg {
-        background: rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(10px);
-        border-radius: 20px;
-        padding: 1.5rem;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    }
-
-    .sidebar-header {
-        color: white;
-        font-weight: 600;
-        font-size: 1.1rem;
-        margin-bottom: 1rem;
-        text-align: center;
-    }
-
-    .mood-indicator {
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 15px;
-        padding: 1rem;
-        margin: 1rem 0;
-        text-align: center;
-        color: white;
-    }
-
-    .mood-emoji {
-        font-size: 2rem;
-        margin-bottom: 0.5rem;
-    }
-
-    .conversation-stats {
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 15px;
-        padding: 1rem;
-        margin: 1rem 0;
-        color: white;
-    }
-
-    .stat-item {
-        display: flex;
-        justify-content: space-between;
-        margin: 0.5rem 0;
-        font-size: 0.9rem;
-    }
-
-    /* Button styling */
-    .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        border-radius: 15px;
-        padding: 0.8rem 2rem;
-        font-weight: 600;
-        font-size: 1rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-    }
-
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
-    }
-
-    /* Input styling */
-    .stTextInput > div > div > input {
-        border-radius: 15px;
-        border: 2px solid rgba(102, 126, 234, 0.3);
-        padding: 1rem;
-        font-size: 1rem;
-        background: rgba(255, 255, 255, 0.9);
-        transition: all 0.3s ease;
-    }
-
-    .stTextInput > div > div > input:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-    }
-
-    /* Disclaimer styling */
-    .disclaimer {
-        background: rgba(254, 178, 178, 0.2);
-        border: 1px solid rgba(239, 68, 68, 0.3);
-        padding: 1rem;
-        border-radius: 15px;
-        color: #991b1b;
-        font-size: 0.9rem;
-        margin: 1rem 0;
-        backdrop-filter: blur(10px);
-    }
-
-    /* Remove default elements */
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .stDeployButton {visibility: hidden;}
-
-    /* Scrollbar styling */
-    ::-webkit-scrollbar {
-        width: 6px;
-    }
-
-    ::-webkit-scrollbar-track {
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 10px;
-    }
-
-    ::-webkit-scrollbar-thumb {
-        background: rgba(102, 126, 234, 0.5);
-        border-radius: 10px;
-    }
-
-    ::-webkit-scrollbar-thumb:hover {
-        background: rgba(102, 126, 234, 0.7);
-    }
-</style>
-""", unsafe_allow_html=True)
-
-class MedicalChatbot:
-    def __init__(self):
+def setup_vector_store():
+    """Setup Qdrant vector store with medical knowledge"""
+    with st.spinner("🔄 Setting up medical knowledge base..."):
         try:
-            # Set litellm environment variables
-            required_secrets = ["LITELLM_API_KEY", "LITELLM_BASE_URL", "LITELLM_MODEL"]
-            for secret in required_secrets:
-                if secret not in st.secrets:
-                    raise ValueError(f"Missing required secret: {secret}")
+            # Setup embeddings
+            embeddings = setup_embeddings()
             
-            os.environ["LITELLM_API_KEY"] = st.secrets["LITELLM_API_KEY"]
-            os.environ["LITELLM_BASE_URL"] = st.secrets["LITELLM_BASE_URL"]
-            self.model = st.secrets["LITELLM_MODEL"]
+            # Create medical documents
+            documents = create_medical_knowledge_base()
             
-            # Initialize Hugging Face embeddings
-            self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+            # Split documents
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500,
+                chunk_overlap=50
+            )
+            splits = text_splitter.split_documents(documents)
             
-            # Initialize vector store with enhanced medical knowledge
-            self.vector_store = self._initialize_vector_store()
+            # Setup Qdrant client (in-memory for simplicity)
+            client = QdrantClient(":memory:")
             
-            # Conversation context and personality
-            self.personality = {
-                "empathetic": True,
-                "supportive": True,
-                "professional": True,
-                "caring": True
-            }
-        except Exception as e:
-            st.error(f"Error initializing MedicalChatbot: {str(e)}")
-            raise
-
-    def _initialize_medical_knowledge(self):
-        """Enhanced medical knowledge base with more comprehensive information"""
-        knowledge = """
-        Common Symptoms and Their Meanings:
-        
-        Fever: Elevated body temperature above 100.4°F (38°C), often indicating infection, inflammation, or immune response. Can be accompanied by chills, sweating, headache, and fatigue. Usually managed with rest, fluids, and fever reducers like acetaminophen or ibuprofen.
-        
-        Headache: Pain in the head or upper neck region. Types include tension headaches (most common), migraines (severe, often with nausea and light sensitivity), cluster headaches, and secondary headaches. Triggers can include stress, dehydration, certain foods, lack of sleep, or underlying conditions.
-        
-        Chest Pain: Discomfort or pain in the chest area. Can range from sharp, stabbing pain to dull aches. Cardiac causes include heart attack, angina, or pericarditis. Non-cardiac causes include muscle strain, anxiety, acid reflux, or lung conditions. Severe chest pain requires immediate medical attention.
-        
-        Shortness of Breath (Dyspnea): Difficulty breathing or feeling breathless. Can be acute (sudden) or chronic (long-term). Causes include asthma, pneumonia, heart conditions, anxiety, or physical exertion. Severe breathing difficulties require immediate medical care.
-        
-        Abdominal Pain: Pain in the stomach area. Can be cramping, sharp, dull, or burning. Common causes include indigestion, gas, constipation, gastroenteritis, appendicitis, or gynecological issues. Location and type of pain can help determine the cause.
-        
-        Nausea and Vomiting: Feeling sick to the stomach and potentially vomiting. Causes include food poisoning, viral infections, motion sickness, pregnancy, medications, or underlying medical conditions.
-        
-        Fatigue: Persistent tiredness or lack of energy. Can be physical, mental, or both. Causes include lack of sleep, stress, poor nutrition, dehydration, infections, or chronic conditions like anemia or thyroid disorders.
-        
-        Common Medications and Information:
-        
-        Acetaminophen (Tylenol): Pain reliever and fever reducer. Generally safe when used as directed. Maximum daily dose is 3000-4000mg for adults. Can cause liver damage if overdosed or combined with alcohol.
-        
-        Ibuprofen (Advil, Motrin): Anti-inflammatory pain reliever. Reduces pain, fever, and inflammation. Can cause stomach upset, so take with food. Avoid if you have kidney problems or stomach ulcers.
-        
-        Aspirin: Pain reliever, fever reducer, and blood thinner. Low-dose aspirin is often prescribed for heart protection. Can interact with blood thinners and cause stomach bleeding.
-        
-        Antibiotics: Medications that fight bacterial infections. Only effective against bacteria, not viruses. Must be taken as prescribed, even if feeling better. Common types include amoxicillin, azithromycin, and ciprofloxacin.
-        
-        Antacids: Neutralize stomach acid to relieve heartburn and indigestion. Examples include Tums, Rolaids, and Maalox. Provide quick but temporary relief.
-        
-        Preventive Care and Wellness:
-        
-        Regular Exercise: Aim for 150 minutes of moderate aerobic activity weekly. Benefits include improved cardiovascular health, stronger bones, better mood, and disease prevention.
-        
-        Balanced Nutrition: Include fruits, vegetables, whole grains, lean proteins, and healthy fats. Stay hydrated with adequate water intake. Limit processed foods, excessive sugar, and sodium.
-        
-        Sleep Hygiene: Adults need 7-9 hours of quality sleep nightly. Maintain consistent sleep schedule, create comfortable sleep environment, and avoid screens before bedtime.
-        
-        Stress Management: Chronic stress affects physical and mental health. Practice relaxation techniques, regular exercise, adequate sleep, and social connections. Consider professional help if needed.
-        
-        Regular Check-ups: Annual physical exams, dental cleanings, eye exams, and age-appropriate screenings help detect problems early when they're most treatable.
-        
-        Mental Health Awareness:
-        
-        Anxiety: Excessive worry or fear that interferes with daily life. Symptoms include restlessness, rapid heartbeat, sweating, and difficulty concentrating. Treatment options include therapy, medication, and lifestyle changes.
-        
-        Depression: Persistent feelings of sadness, hopelessness, or loss of interest in activities. Can affect sleep, appetite, energy, and concentration. Professional help is available and effective.
-        
-        Emergency Warning Signs:
-        
-        Seek immediate medical attention for: chest pain with shortness of breath, severe abdominal pain, difficulty breathing, signs of stroke (facial drooping, arm weakness, speech difficulties), severe allergic reactions, or any symptom that feels life-threatening.
-        
-        When to See a Doctor:
-        
-        Persistent symptoms lasting more than a few days, worsening symptoms, high fever, severe pain, unusual changes in your body, or when you're concerned about your health. Trust your instincts about your body.
-        """
-        return knowledge
-
-    def _initialize_vector_store(self):
-        """Split text and create FAISS vector store with enhanced knowledge"""
-        text = self._initialize_medical_knowledge()
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=800,
-            chunk_overlap=100
-        )
-        chunks = text_splitter.split_text(text)
-        return FAISS.from_texts(chunks, self.embeddings)
-
-    def retrieve_relevant_info(self, query: str, conversation_history: list, top_k: int = 4):
-        """Retrieve relevant documents considering conversation context"""
-        # Combine current query with recent conversation context
-        context_query = query
-        if conversation_history:
-            recent_messages = conversation_history[-3:]  # Last 3 exchanges
-            context_text = " ".join([msg['content'] for msg in recent_messages])
-            context_query = f"{context_text} {query}"
-        
-        docs = self.vector_store.similarity_search(context_query, k=top_k)
-        return [doc.page_content for doc in docs]
-
-    def analyze_user_mood(self, message: str):
-        """Simple mood analysis based on keywords"""
-        worry_words = ['worried', 'scared', 'anxious', 'afraid', 'concerned', 'nervous', 'panic']
-        pain_words = ['hurt', 'pain', 'ache', 'sore', 'painful', 'burning', 'stabbing']
-        sad_words = ['sad', 'depressed', 'down', 'upset', 'crying', 'hopeless']
-        
-        message_lower = message.lower()
-        
-        if any(word in message_lower for word in worry_words):
-            return {"mood": "worried", "emoji": "😟", "response_tone": "reassuring"}
-        elif any(word in message_lower for word in pain_words):
-            return {"mood": "in_pain", "emoji": "😣", "response_tone": "caring"}
-        elif any(word in message_lower for word in sad_words):
-            return {"mood": "sad", "emoji": "😢", "response_tone": "supportive"}
-        else:
-            return {"mood": "neutral", "emoji": "🙂", "response_tone": "friendly"}
-
-    def generate_empathetic_response(self, query: str, user_type: str, conversation_history: list, user_mood: dict):
-        """Generate empathetic response using RAG with conversation memory"""
-        try:
-            # Validate inputs
-            if not query or not isinstance(query, str):
-                raise ValueError("Invalid query provided")
-            if not user_type or not isinstance(user_type, str):
-                raise ValueError("Invalid user type provided")
-            if not isinstance(conversation_history, list):
-                raise ValueError("Invalid conversation history format")
-            if not isinstance(user_mood, dict) or 'mood' not in user_mood:
-                raise ValueError("Invalid user mood format")
-
-            # Retrieve relevant information
-            relevant_docs = self.retrieve_relevant_info(query, conversation_history)
-            context = "\n".join(relevant_docs)
-            
-            # Build conversation context
-            conversation_context = ""
-            if conversation_history:
-                recent_history = conversation_history[-4:]  # Last 4 exchanges
-                conversation_context = "\n".join([
-                    f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
-                    for msg in recent_history
-                ])
-
-            # Create empathetic system prompt based on mood
-            empathy_instructions = {
-                "worried": "The user seems worried or anxious. Be extra reassuring, acknowledge their concerns, and provide calm, supportive guidance.",
-                "in_pain": "The user appears to be in pain or discomfort. Show compassion, validate their experience, and provide helpful information with care.",
-                "sad": "The user seems sad or down. Be particularly supportive, encouraging, and gentle in your response.",
-                "neutral": "Maintain a warm, caring, and professional tone while being helpful and informative."
-            }
-
-            system_prompt = f"""You are MedAssist AI, a caring and empathetic medical information assistant. You have a warm, compassionate personality and truly care about helping people with their health concerns.
-
-PERSONALITY TRAITS:
-- Deeply empathetic and understanding
-- Warm and caring in tone
-- Professional yet personable
-- Supportive and reassuring
-- Never dismissive of concerns
-- Acknowledges emotions and validates feelings
-
-USER CONTEXT:
-- User type: {user_type}
-- Current mood: {user_mood['mood']} {user_mood['emoji']}
-- Response approach: {empathy_instructions[user_mood['mood']]}
-
-CONVERSATION HISTORY:
-{conversation_context}
-
-MEDICAL KNOWLEDGE CONTEXT:
-{context}
-
-INSTRUCTIONS:
-1. Always acknowledge the user's feelings and concerns first
-2. Provide {'detailed, technical' if user_type == 'Healthcare Professional' else 'clear, easy-to-understand'} information
-3. Be encouraging and supportive
-4. Use appropriate emotional language and empathy
-5. Remember previous parts of the conversation
-6. Always end with care and support
-7. Include relevant medical information from the context
-8. Always include appropriate disclaimers about consulting healthcare professionals
-
-Current user message: {query}
-
-Respond with empathy, care, and helpful medical information."""
-            
-            response = completion(
-                model=self.model,
-                api_base=st.secrets["LITELLM_BASE_URL"],
-                api_key=st.secrets["LITELLM_API_KEY"],
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query}
-                ],
-                temperature=0.7,  # Slightly higher for more empathetic responses
-                max_tokens=1200
+            # Create collection
+            client.create_collection(
+                collection_name="medical_knowledge",
+                vectors_config=models.VectorParams(
+                    size=384,  # MiniLM embedding size
+                    distance=models.Distance.COSINE
+                )
             )
             
-            if not response or not response.choices:
-                raise ValueError("Empty response from API")
-                
-            answer = response.choices[0].message.content
-            return {"answer": answer, "mood_detected": user_mood}
+            # Create vector store
+            vector_store = Qdrant(
+                client=client,
+                collection_name="medical_knowledge",
+                embeddings=embeddings
+            )
+            
+            # Add documents
+            vector_store.add_documents(splits)
+            
+            return vector_store
             
         except Exception as e:
-            error_msg = f"Error generating response: {str(e)}"
-            st.error(error_msg)
-            return {"error": error_msg}
+            st.error(f"Error setting up vector store: {str(e)}")
+            return None
 
-def initialize_session_state():
-    """Initialize session state for chatbot with proper error handling"""
-    try:
-        # Initialize core session state variables
-        if 'conversation_history' not in st.session_state:
-            st.session_state.conversation_history = []
-        if 'chatbot' not in st.session_state:
-            st.session_state.chatbot = MedicalChatbot()
-        if 'user_mood_history' not in st.session_state:
-            st.session_state.user_mood_history = []
-        if 'conversation_started' not in st.session_state:
-            st.session_state.conversation_started = False
-        if 'typing' not in st.session_state:
-            st.session_state.typing = False
-        if 'session_start' not in st.session_state:
-            st.session_state.session_start = datetime.now()
-        if 'last_error' not in st.session_state:
-            st.session_state.last_error = None
-            
-        # Validate session state
-        if not isinstance(st.session_state.conversation_history, list):
-            st.session_state.conversation_history = []
-        if not isinstance(st.session_state.user_mood_history, list):
-            st.session_state.user_mood_history = []
-        if not isinstance(st.session_state.session_start, datetime):
-            st.session_state.session_start = datetime.now()
-            
-    except Exception as e:
-        st.error(f"Error initializing session state: {str(e)}")
-        # Reset session state to safe defaults
-        st.session_state.clear()
-        st.session_state.conversation_history = []
-        st.session_state.user_mood_history = []
-        st.session_state.conversation_started = False
-        st.session_state.typing = False
-        st.session_state.session_start = datetime.now()
-        st.session_state.last_error = str(e)
+def classify_user_context(user_type, urgency):
+    """Classify user context and urgency"""
+    context = {
+        "user_type": user_type,
+        "urgency": urgency,
+        "is_professional": user_type == "Healthcare Professional"
+    }
+    return context
 
-def display_message(role: str, content: str, timestamp: str = None, mood: dict = None):
-    """Display a message in the chat interface with proper validation and error handling"""
-    try:
-        # Validate inputs
-        if not role or not isinstance(role, str):
-            raise ValueError("Invalid message role")
-        if not content or not isinstance(content, str):
-            raise ValueError("Invalid message content")
+def create_qa_chain(vector_store, user_context):
+    """Create QA chain with medical prompt template"""
+    llm = setup_llm()
+    
+    # Create prompt template based on user context
+    if user_context["is_professional"]:
+        template = """You are a medical AI assistant providing information to healthcare professionals.
         
-        # Set default timestamp if none provided
-        if timestamp is None:
-            timestamp = datetime.now().strftime("%H:%M")
-        elif not isinstance(timestamp, str):
-            timestamp = datetime.now().strftime("%H:%M")
-            
-        # Validate mood data
-        mood_emoji = ""
-        if mood and isinstance(mood, dict) and 'emoji' in mood:
-            mood_emoji = mood['emoji']
-        
-        # Generate appropriate message HTML based on role
-        if role == "user":
-            st.markdown(f"""
-            <div class="user-message">
-                {content}
-                <div style="font-size: 0.8em; opacity: 0.7; margin-top: 0.5rem;">
-                    {timestamp} {mood_emoji}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        elif role == "assistant":
-            st.markdown(f"""
-            <div class="bot-message">
-                {content}
-                <div style="font-size: 0.8em; opacity: 0.7; margin-top: 0.5rem;">
-                    🩺 MedAssist • {timestamp}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        elif role == "system":
-            st.markdown(f"""
-            <div class="system-message">
-                {content}
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            raise ValueError(f"Invalid message role: {role}")
-            
-    except Exception as e:
-        st.error(f"Error displaying message: {str(e)}")
-        # Display a fallback message
-        st.markdown(f"""
-        <div class="system-message">
-            Error displaying message. Please try again.
-        </div>
-        """, unsafe_allow_html=True)
+Context: {context}
 
-def display_typing_indicator():
-    """Display typing indicator"""
-    st.markdown("""
-    <div class="typing-indicator">
-        <div class="typing-dots">
-            <span></span>
-            <span></span>
-            <span></span>
-        </div>
-        <span style="margin-left: 10px; color: #667eea;">MedAssist is thinking...</span>
-    </div>
-    """, unsafe_allow_html=True)
+Question: {question}
 
-def get_conversation_stats():
-    """Calculate conversation statistics with proper error handling"""
-    try:
-        # Initialize default stats
-        stats = {
-            "total_messages": 0,
-            "user_messages": 0,
-            "dominant_mood": "neutral",
-            "session_start": datetime.now()
-        }
+Provide a detailed, evidence-based response including:
+1. Clinical information and differential diagnoses where relevant
+2. Current medical guidelines and recommendations
+3. Potential complications or considerations
+4. Confidence level in your response
+
+Remember: This is for informational purposes only and should not replace clinical judgment.
+
+Answer:"""
+    else:
+        template = """You are a medical AI assistant providing information to patients and the general public.
+
+Context: {context}
+
+Question: {question}
+
+Provide a clear, understandable response including:
+1. Simple explanation of the condition or topic
+2. General recommendations and when to seek medical care
+3. Important safety information
+4. Confidence level in your response
+
+IMPORTANT DISCLAIMER: This information is for educational purposes only and does not constitute medical advice. Always consult with a qualified healthcare professional for proper diagnosis and treatment.
+
+Answer:"""
+    
+    prompt = PromptTemplate(
+        template=template,
+        input_variables=["context", "question"]
+    )
+    
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
+        chain_type_kwargs={"prompt": prompt},
+        return_source_documents=True
+    )
+    
+    return qa_chain
+
+def generate_medical_response(question, user_context, qa_chain):
+    """Generate evidence-based medical response"""
+    with st.spinner("🔍 Searching medical knowledge base..."):
+        time.sleep(1)  # Simulate processing
         
-        # Get conversation history
-        conversation_history = st.session_state.get('conversation_history', [])
-        if not isinstance(conversation_history, list):
-            conversation_history = []
-            
-        # Calculate message counts
-        stats["total_messages"] = len(conversation_history)
-        stats["user_messages"] = len([msg for msg in conversation_history if msg.get('role') == 'user'])
-        
-        # Calculate mood statistics
-        mood_history = st.session_state.get('user_mood_history', [])
-        if isinstance(mood_history, list):
-            mood_counts = {}
-            for mood_data in mood_history:
-                if isinstance(mood_data, dict) and 'mood' in mood_data:
-                    mood = mood_data['mood']
-                    mood_counts[mood] = mood_counts.get(mood, 0) + 1
-            
-            if mood_counts:
-                stats["dominant_mood"] = max(mood_counts.items(), key=lambda x: x[1])[0]
-        
-        # Get session start time
-        session_start = st.session_state.get('session_start')
-        if isinstance(session_start, datetime):
-            stats["session_start"] = session_start
-            
-        return stats
-        
-    except Exception as e:
-        st.error(f"Error calculating conversation stats: {str(e)}")
-        # Return default stats
-        return {
-            "total_messages": 0,
-            "user_messages": 0,
-            "dominant_mood": "neutral",
-            "session_start": datetime.now()
-        }
+    with st.spinner("🧠 Analyzing medical information..."):
+        try:
+            result = qa_chain({"query": question})
+            return result
+        except Exception as e:
+            st.error(f"Error generating response: {str(e)}")
+            return None
 
 def main():
-    initialize_session_state()
-    
-    # Initialize session start time
-    if 'session_start' not in st.session_state:
-        st.session_state.session_start = datetime.now()
-
     # Header
-    st.markdown("""
-    <div class="chat-header">
-        <h1>🩺 MedAssist AI</h1>
-        <p>Your Caring Medical Companion - Here to listen, understand, and help 💙</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Sidebar with user profile and stats
+    st.title("🏥 Medical Q&A Assistant")
+    st.markdown("*Providing evidence-based medical information with appropriate disclaimers*")
+    
+    # Sidebar for user context
     with st.sidebar:
-        st.markdown('<div class="sidebar-header">👤 Your Profile</div>', unsafe_allow_html=True)
+        st.header("👤 User Information")
         
         user_type = st.selectbox(
             "I am a:",
             ["Patient/General Public", "Healthcare Professional"],
-            help="This helps me tailor my responses to your level of medical knowledge"
+            help="This helps tailor the response appropriately"
         )
-
-        # Conversation stats
-        stats = get_conversation_stats()
-        st.markdown(f"""
-        <div class="conversation-stats">
-            <h4 style="color: white; text-align: center; margin-bottom: 1rem;">📊 Chat Session</h4>
-            <div class="stat-item">
-                <span>Messages:</span>
-                <span>{stats['total_messages']}</span>
-            </div>
-            <div class="stat-item">
-                <span>Your questions:</span>
-                <span>{stats['user_messages']}</span>
-            </div>
-            <div class="stat-item">
-                <span>Session time:</span>
-                <span>{int((datetime.now() - stats['session_start']).total_seconds() / 60)}m</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Current mood indicator
-        if st.session_state.user_mood_history:
-            latest_mood = st.session_state.user_mood_history[-1]
-            mood_descriptions = {
-                "worried": "You seem concerned - I'm here to help ease your worries",
-                "in_pain": "I understand you're uncomfortable - let's work through this",
-                "sad": "I can sense you're feeling down - you're not alone",
-                "neutral": "Great to chat with you today!"
-            }
+        
+        urgency = st.selectbox(
+            "Urgency Level:",
+            ["General Information", "Moderate Concern", "High Priority"],
+            help="Indicates the urgency of your medical question"
+        )
+        
+        st.markdown("---")
+        st.markdown("### ⚠️ Important Notice")
+        st.warning(
+            "This AI assistant provides general medical information only. "
+            "For emergencies, call emergency services immediately. "
+            "Always consult healthcare professionals for medical advice."
+        )
+    
+    # Initialize vector store if not exists
+    if st.session_state.vector_store is None:
+        with st.spinner("🚀 Initializing medical knowledge base..."):
+            st.session_state.vector_store = setup_vector_store()
             
-            st.markdown(f"""
-            <div class="mood-indicator">
-                <div class="mood-emoji">{latest_mood['emoji']}</div>
-                <div style="font-size: 0.9rem;">{mood_descriptions[latest_mood['mood']]}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Control buttons
-        if st.button("🔄 New Conversation"):
-            st.session_state.conversation_history = []
-            st.session_state.user_mood_history = []
-            st.session_state.conversation_started = False
-            st.session_state.session_start = datetime.now()
-            st.rerun()
-
-        if st.button("💾 Save Chat History"):
-            if st.session_state.conversation_history:
-                chat_data = {
-                    "timestamp": datetime.now().isoformat(),
-                    "user_type": user_type,
-                    "conversation": st.session_state.conversation_history,
-                    "mood_history": st.session_state.user_mood_history
-                }
-                st.download_button(
-                    label="📱 Download Chat",
-                    data=json.dumps(chat_data, indent=2),
-                    file_name=f"medassist_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
+        if st.session_state.vector_store is None:
+            st.error("Failed to initialize the medical knowledge base. Please refresh the page.")
+            return
+    
+    # Main interface
+    st.markdown("### 💬 Ask Your Medical Question")
+    
+    question = st.text_area(
+        "Enter your medical question:",
+        placeholder="e.g., What are the symptoms of high blood pressure?",
+        height=100
+    )
+    
+    if st.button("🔍 Get Medical Information", type="primary"):
+        if not question.strip():
+            st.warning("Please enter a medical question.")
+            return
+            
+        # Classify user context
+        user_context = classify_user_context(user_type, urgency)
+        
+        # Create QA chain
+        if st.session_state.qa_chain is None:
+            with st.spinner("⚙️ Setting up medical analysis system..."):
+                st.session_state.qa_chain = create_qa_chain(
+                    st.session_state.vector_store, 
+                    user_context
                 )
-
-    # Main chat interface
-    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-    
-    # Welcome message for new users
-    if not st.session_state.conversation_started:
-        display_message("system", "💙 Welcome! I'm MedAssist AI, your caring medical companion. I'm here to listen to your health concerns and provide helpful information with empathy and understanding. How are you feeling today?")
-        st.session_state.conversation_started = True
-
-    # Display conversation history
-    for i, message in enumerate(st.session_state.conversation_history):
-        mood_data = st.session_state.user_mood_history[i//2] if message['role'] == 'user' and i//2 < len(st.session_state.user_mood_history) else None
-        display_message(
-            message['role'], 
-            message['content'], 
-            message.get('timestamp', ''), 
-            mood_data
-        )
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Input area
-    st.markdown('<div class="input-container">', unsafe_allow_html=True)
-    st.markdown("### 💬 Share your health concerns, symptoms, or questions:")
-    
-    # Create columns for input and button
-    col1, col2 = st.columns([4, 1])
-    
-    with col1:
-        user_input = st.text_input(
-            "Message MedAssist...",
-            placeholder="e.g., I've been having headaches for 3 days and I'm worried...",
-            key="user_message_input",
-            label_visibility="collapsed"
-        )
-    
-    with col2:
-        send_button = st.button("Send 💙", use_container_width=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Process user input
-    if send_button and user_input.strip():
-        # Analyze user mood
-        user_mood = st.session_state.chatbot.analyze_user_mood(user_input)
-        st.session_state.user_mood_history.append(user_mood)
-        
-        # Add user message to conversation
-        user_message = {
-            "role": "user",
-            "content": user_input,
-            "timestamp": datetime.now().strftime("%H:%M")
-        }
-        st.session_state.conversation_history.append(user_message)
-        
-        # Display typing indicator
-        st.session_state.typing = True
-        st.rerun()
-
-    # Show typing indicator when processing
-    if st.session_state.typing:
-        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-        display_typing_indicator()
-        st.markdown('</div>', unsafe_allow_html=True)
         
         # Generate response
-        response = st.session_state.chatbot.generate_empathetic_response(
-            st.session_state.conversation_history[-1]['content'],
-            user_type,
-            st.session_state.conversation_history[:-1],  # Exclude current message
-            st.session_state.user_mood_history[-1]
+        result = generate_medical_response(
+            question, 
+            user_context, 
+            st.session_state.qa_chain
         )
         
-        st.session_state.typing = False
-        
-        if "error" not in response:
-            # Add assistant response to conversation
-            assistant_message = {
-                "role": "assistant",
-                "content": response['answer'],
-                "timestamp": datetime.now().strftime("%H:%M")
-            }
-            st.session_state.conversation_history.append(assistant_message)
+        if result:
+            # Display response
+            st.markdown("### 📋 Medical Information")
             
-            # Clear input and refresh
-            st.session_state.user_message_input = ""
-            st.rerun()
-        else:
-            st.error(f"I'm sorry, I encountered an issue: {response['error']}. Please try again.")
-            st.session_state.typing = False
-
-    # Quick action buttons for common concerns
-    st.markdown("### 🚀 Quick Help Options:")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        if st.button("🤒 Fever & Symptoms"):
-            quick_message = "I have a fever and I'm not feeling well. What should I know about fever and when should I be concerned?"
-            st.session_state.conversation_history.append({
-                "role": "user",
-                "content": quick_message,
-                "timestamp": datetime.now().strftime("%H:%M")
-            })
-            st.session_state.user_mood_history.append({"mood": "worried", "emoji": "😟", "response_tone": "reassuring"})
-            st.session_state.typing = True
-            st.rerun()
-    
-    with col2:
-        if st.button("💊 Medication Info"):
-            quick_message = "I need information about medications and their effects. Can you help me understand what I should know?"
-            st.session_state.conversation_history.append({
-                "role": "user",
-                "content": quick_message,
-                "timestamp": datetime.now().strftime("%H:%M")
-            })
-            st.session_state.user_mood_history.append({"mood": "neutral", "emoji": "🙂", "response_tone": "friendly"})
-            st.session_state.typing = True
-            st.rerun()
-    
-    with col3:
-        if st.button("😰 Anxiety & Stress"):
-            quick_message = "I've been feeling anxious and stressed lately. Can you help me understand these feelings and what might help?"
-            st.session_state.conversation_history.append({
-                "role": "user",
-                "content": quick_message,
-                "timestamp": datetime.now().strftime("%H:%M")
-            })
-            st.session_state.user_mood_history.append({"mood": "worried", "emoji": "😟", "response_tone": "reassuring"})
-            st.session_state.typing = True
-            st.rerun()
-    
-    with col4:
-        if st.button("🏥 When to See Doctor"):
-            quick_message = "I'm not sure if my symptoms are serious enough to see a doctor. Can you help me understand when I should seek medical care?"
-            st.session_state.conversation_history.append({
-                "role": "user",
-                "content": quick_message,
-                "timestamp": datetime.now().strftime("%H:%M")
-            })
-            st.session_state.user_mood_history.append({"mood": "worried", "emoji": "😟", "response_tone": "reassuring"})
-            st.session_state.typing = True
-            st.rerun()
-
-    # Emergency notice
-    st.markdown("""
-    <div class="disclaimer">
-        <h4 style="color: #991b1b; margin: 0 0 0.5rem 0;">🚨 Important Medical Disclaimer</h4>
-        <p style="margin: 0; font-size: 0.9rem;">
-            <strong>Emergency situations:</strong> If you're experiencing severe chest pain, difficulty breathing, 
-            signs of stroke, severe bleeding, or any life-threatening emergency, please call emergency services 
-            immediately (911 in the US) or go to your nearest emergency room.
-        </p>
-        <br>
-        <p style="margin: 0; font-size: 0.9rem;">
-            <strong>Medical advice:</strong> I provide general health information and emotional support, but I cannot 
-            replace professional medical advice, diagnosis, or treatment. Always consult with qualified healthcare 
-            providers for medical concerns and before making health decisions.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Helpful resources section
-    with st.expander("📚 Helpful Health Resources"):
-        st.markdown("""
-        **🆘 Emergency Services:**
-        - **Emergency:** 911 (US), 999 (UK), 112 (EU)
-        - **Poison Control:** 1-800-222-1222 (US)
-        - **Crisis Text Line:** Text HOME to 741741
-        
-        **🔍 Trusted Medical Resources:**
-        - **Mayo Clinic:** mayoclinic.org
-        - **WebMD:** webmd.com  
-        - **MedlinePlus:** medlineplus.gov
-        - **CDC:** cdc.gov
-        
-        **🧠 Mental Health Resources:**
-        - **National Suicide Prevention Lifeline:** 988
-        - **Crisis Text Line:** Text HOME to 741741
-        - **Mental Health America:** mhanational.org
-        
-        **💡 Remember:** I'm here to provide information and support, but these resources can offer additional help when you need it most.
-        """)
-
-    # Footer with care message
-    st.markdown("""
-    <div style="text-align: center; padding: 2rem; color: rgba(255, 255, 255, 0.8); font-size: 0.9rem;">
-        💙 Take care of yourself - your health and wellbeing matter. I'm here whenever you need support. 💙
-    </div>
-    """, unsafe_allow_html=True)
+            # Main answer
+            st.markdown("**Response:**")
+            st.write(result['result'])
+            
+            # Confidence and reliability
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**📊 Reliability Level:**")
+                st.info("Based on general medical knowledge")
+                
+            with col2:
+                st.markdown("**👤 Response Type:**")
+                st.info(f"Tailored for: {user_type}")
+            
+            # Source information
+            if result.get('source_documents'):
+                with st.expander("📚 Knowledge Sources"):
+                    for i, doc in enumerate(result['source_documents']):
+                        st.write(f"**Source {i+1}:** {doc.page_content[:200]}...")
+            
+            # Related topics
+            st.markdown("---")
+            st.markdown("**🔗 Related Topics to Explore:**")
+            related_topics = [
+                "Symptoms and diagnosis",
+                "Treatment options",
+                "Prevention strategies",
+                "When to seek medical care"
+            ]
+            
+            cols = st.columns(len(related_topics))
+            for i, topic in enumerate(related_topics):
+                with cols[i]:
+                    if st.button(topic, key=f"related_{i}"):
+                        st.info(f"Consider asking about: {topic.lower()} related to your condition")
+            
+            # Final disclaimer
+            st.markdown("---")
+            st.error(
+                "⚠️ **MEDICAL DISCLAIMER:** This information is for educational purposes only. "
+                "It does not constitute medical advice, diagnosis, or treatment. "
+                "Always consult with qualified healthcare professionals for medical concerns."
+            )
 
 if __name__ == "__main__":
     main()
