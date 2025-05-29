@@ -1,4 +1,4 @@
-
+pypdf
 streamlit
 langchain
 langchain-community
