@@ -1,11 +1,5 @@
 streamlit
 langchain
-langchain-qdrant
-langchain-litellm
-sentence-transformers
+langchain-community
 litellm
-requests
-duckduckgo-search
-beautifulsoup4
-lxml
-aiohttp
+python-dotenv
