@@ -81,8 +81,13 @@ st.markdown("""
 
     .content-box h3 {
         font-weight: 600;
-        color: #333;
+        color: #000;
         margin-bottom: 1rem;
+    }
+
+    /* Ensure all h3 within main app are black */
+    .stApp h3 {
+        color: #000 !important;
     }
 
     /* Input label styling */
