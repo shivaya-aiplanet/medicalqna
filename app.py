@@ -165,27 +165,28 @@ def create_medical_prompt(user_context, urgency_level, has_knowledge_base=False,
     # Add conversation history context
     history_context = ""
     if chat_history and len(chat_history) > 0:
-        history_context = "\n\nPrevious conversation context:\n"
+        history_context = "\n\nPrevious conversation context (use this to understand follow-up questions):\n"
         # Include last 3 exchanges for context
         recent_history = chat_history[-3:] if len(chat_history) > 3 else chat_history
-        for chat in recent_history:
-            history_context += f"Q: {chat['question']}\nA: {chat['answer'][:200]}...\n\n"
-        history_context += "Use this conversation context to understand follow-up questions and provide relevant answers.\n"
+        for i, chat in enumerate(recent_history):
+            history_context += f"Previous Q{i+1}: {chat['question']}\n"
+            history_context += f"Previous A{i+1}: {chat['answer'][:300]}\n\n"
+        history_context += "Based on this conversation history, answer the current question. If the current question refers to 'it', 'this', 'that', or similar pronouns, use the context above to understand what is being referenced.\n"
     
     if has_knowledge_base:
         context_instruction = f"""
         Answer the question based on the provided context from the uploaded document. 
         If the context doesn't contain relevant information, clearly state that the information is not available in the document.
         {history_context}
-        Context: {{context}}
+        Document Context: {{context}}
         
-        Question: {{question}}"""
+        Current Question: {{question}}"""
     else:
         context_instruction = f"""
         Answer the medical question based on your general medical knowledge. 
         Provide accurate, evidence-based information.
         {history_context}
-        Question: {{question}}"""
+        Current Question: {{question}}"""
     
     full_prompt = base_prompt + urgency_note + "\n\n" + context_instruction
     
@@ -203,7 +204,7 @@ def generate_response(query, user_type, urgency):
     try:
         if st.session_state.vector_store:
             # Use Qdrant vector store for retrieval
-            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=True)
+            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=True, chat_history=st.session_state.chat_history)
             
             qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
@@ -216,7 +217,7 @@ def generate_response(query, user_type, urgency):
             
         else:
             # Use LLM directly without knowledge base
-            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=False)
+            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=False, chat_history=st.session_state.chat_history)
             formatted_prompt = prompt_template.format_messages(question=query)
             response = llm.invoke(formatted_prompt)
             response = response.content
@@ -352,6 +353,17 @@ def main():
             st.info("Answers will be based on your uploaded document")
         else:
             st.info("💡 No document loaded - answers will be based on general medical knowledge")
+        
+        # Debug info (can be removed later)
+        if st.session_state.chat_history:
+            st.markdown("---")
+            st.header("Debug Info")
+            st.write(f"Chat history length: {len(st.session_state.chat_history)}")
+            with st.expander("View Chat History (Debug)", expanded=False):
+                for i, chat in enumerate(st.session_state.chat_history):
+                    st.write(f"**{i+1}. Q:** {chat['question']}")
+                    st.write(f"**A:** {chat['answer'][:100]}...")
+                    st.write("---")
     
     # Main chat interface
     st.subheader("💬 Ask Your Medical Question")
@@ -408,6 +420,7 @@ def main():
                     'question': query,
                     'answer': response
                 })
+                # Clear the input by rerunning
                 st.rerun()
     
     # Show latest response with disclaimer
