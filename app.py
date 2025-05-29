@@ -12,6 +12,7 @@ import pickle
 import os
 from typing import List, Dict, Any
 import re
+import torch
 
 # Page config
 st.set_page_config(
@@ -110,7 +111,14 @@ st.markdown("""
 
 class MedicalKnowledgeBase:
     def __init__(self):
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        try:
+            # Check if CUDA is available, otherwise use CPU
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+        except Exception as e:
+            st.error(f"Error initializing model: {str(e)}")
+            # Fallback to CPU if there's an error
+            self.model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
         self.knowledge_base = self._initialize_medical_knowledge()
         
     def _initialize_medical_knowledge(self):
