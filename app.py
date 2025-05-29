@@ -85,6 +85,14 @@ st.markdown("""
         margin-bottom: 1rem;
     }
 
+    /* Input label styling */
+    .stTextInput > label {
+        color: #333;
+        font-weight: 400;
+        margin-bottom: 0.5rem;
+        display: block;
+    }
+
     /* Response box - transparent background, black text */
     .response-box {
         padding: 1.5rem;
