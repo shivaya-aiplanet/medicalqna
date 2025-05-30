@@ -26,8 +26,8 @@ if 'uploaded_file_name' not in st.session_state:
     st.session_state.uploaded_file_name = None
 if 'collection_name' not in st.session_state:
     st.session_state.collection_name = None
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
 
 def initialize_llm():
     """Initialize LiteLLM with configuration"""
@@ -147,8 +147,17 @@ def classify_user_context(user_type, urgency):
     
     return context_map.get(user_type, "patient"), urgency_map.get(urgency, "routine_inquiry")
 
-def create_medical_prompt(user_context, urgency_level, has_knowledge_base=False, chat_history=None):
-    """Create context-aware medical prompt with conversation history"""
+def get_style_instruction(style):
+    """Get style instruction based on user selection"""
+    style_map = {
+        "Concise": "Provide a brief, concise answer focusing on key points only. Keep the response short and direct.",
+        "Moderate": "Provide a balanced response with adequate detail and explanation while maintaining clarity.",
+        "Prolonged": "Provide a comprehensive, detailed response with thorough explanations, background information, and examples where appropriate."
+    }
+    return style_map.get(style, style_map["Moderate"])
+
+def create_medical_prompt(user_context, urgency_level, style, has_knowledge_base=False):
+    """Create context-aware medical prompt"""
     
     if user_context == "medical_professional":
         base_prompt = """You are a medical information assistant designed to support healthcare professionals. 
@@ -162,37 +171,29 @@ def create_medical_prompt(user_context, urgency_level, has_knowledge_base=False,
     else:
         urgency_note = ""
     
-    # Add conversation history context
-    history_context = ""
-    if chat_history and len(chat_history) > 0:
-        history_context = "\n\nPrevious conversation context (use this to understand follow-up questions):\n"
-        # Include last 3 exchanges for context
-        recent_history = chat_history[-3:] if len(chat_history) > 3 else chat_history
-        for i, chat in enumerate(recent_history):
-            history_context += f"Previous Q{i+1}: {chat['question']}\n"
-            history_context += f"Previous A{i+1}: {chat['answer'][:300]}\n\n"
-        history_context += "Based on this conversation history, answer the current question. If the current question refers to 'it', 'this', 'that', or similar pronouns, use the context above to understand what is being referenced.\n"
+    # Add style instruction
+    style_instruction = f"\n\nResponse Style: {get_style_instruction(style)}"
     
     if has_knowledge_base:
         context_instruction = f"""
         Answer the question based on the provided context from the uploaded document. 
         If the context doesn't contain relevant information, clearly state that the information is not available in the document.
-        {history_context}
+        
         Document Context: {{context}}
         
-        Current Question: {{question}}"""
+        Question: {{question}}"""
     else:
         context_instruction = f"""
         Answer the medical question based on your general medical knowledge. 
         Provide accurate, evidence-based information.
-        {history_context}
-        Current Question: {{question}}"""
+        
+        Question: {{question}}"""
     
-    full_prompt = base_prompt + urgency_note + "\n\n" + context_instruction
+    full_prompt = base_prompt + urgency_note + style_instruction + "\n\n" + context_instruction
     
     return ChatPromptTemplate.from_template(full_prompt)
 
-def generate_response(query, user_type, urgency):
+def generate_response(query, user_type, urgency, style):
     """Generate response with or without knowledge base"""
     
     llm = initialize_llm()
@@ -204,7 +205,7 @@ def generate_response(query, user_type, urgency):
     try:
         if st.session_state.vector_store:
             # Use Qdrant vector store for retrieval
-            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=True, chat_history=st.session_state.chat_history)
+            prompt_template = create_medical_prompt(user_context, urgency_level, style, has_knowledge_base=True)
             
             qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
@@ -217,7 +218,7 @@ def generate_response(query, user_type, urgency):
             
         else:
             # Use LLM directly without knowledge base
-            prompt_template = create_medical_prompt(user_context, urgency_level, has_knowledge_base=False, chat_history=st.session_state.chat_history)
+            prompt_template = create_medical_prompt(user_context, urgency_level, style, has_knowledge_base=False)
             formatted_prompt = prompt_template.format_messages(question=query)
             response = llm.invoke(formatted_prompt)
             response = response.content
@@ -260,22 +261,13 @@ def clear_vector_store():
         st.session_state.vector_store = None
         st.session_state.uploaded_file_name = None
         st.session_state.collection_name = None
-        st.session_state.chat_history = []
+        st.session_state.messages = []
         
     except Exception as e:
         st.error(f"Error clearing vector store: {str(e)}")
 
-def display_chat_history():
-    """Display chat history"""
-    for i, chat in enumerate(st.session_state.chat_history):
-        with st.container():
-            st.markdown(f"**You:** {chat['question']}")
-            st.markdown(f"**Assistant:** {chat['answer']}")
-            if i < len(st.session_state.chat_history) - 1:
-                st.markdown("---")
-
-def get_suggested_questions():
-    """Get suggested questions based on document availability"""
+def get_sample_questions():
+    """Get sample questions based on document availability"""
     if st.session_state.vector_store:
         return [
             "What is the main topic discussed in this document?",
@@ -291,6 +283,30 @@ def get_suggested_questions():
             "When should I see a doctor for persistent headaches?"
         ]
 
+def process_message_response(query, user_type, urgency, style):
+    """Process and return message response data"""
+    response = generate_response(query, user_type, urgency, style)
+    if response:
+        user_context, urgency_level = classify_user_context(user_type, urgency)
+        disclaimer = add_medical_disclaimers(urgency_level)
+        
+        # Combine response with disclaimer
+        full_response = response + "\n\n" + disclaimer
+        
+        # Add source information
+        if st.session_state.vector_store:
+            source_info = f"\n\n💡 Answer based on your document: {st.session_state.uploaded_file_name}"
+        else:
+            source_info = "\n\n💡 Answer based on general medical knowledge"
+        
+        full_response += source_info
+        
+        return {
+            "role": "assistant",
+            "content": full_response
+        }
+    return None
+
 def main():
     """Main Streamlit application"""
     
@@ -298,8 +314,9 @@ def main():
     st.title("🏥 Medical Q&A Assistant")
     st.markdown("*Get answers to your medical questions with AI-powered assistance*")
     
-    # Sidebar for document upload and user context
+    # Sidebar configuration
     with st.sidebar:
+        # 1. Document Upload
         st.header("📄 Document Upload")
         
         uploaded_file = st.file_uploader(
@@ -331,7 +348,30 @@ def main():
             st.rerun()
         
         st.markdown("---")
-        st.header("User Context")
+        
+        # 2. Current Status
+        st.header("📊 Current Status")
+        if st.session_state.vector_store:
+            st.success(f"📄 Document: {st.session_state.uploaded_file_name}")
+            st.info("Answers will be based on your uploaded document")
+        else:
+            st.info("💡 No document loaded - answers will be based on general medical knowledge")
+        
+        st.markdown("---")
+        
+        # 3. Response Style
+        st.header("🎨 Response Style")
+        style = st.radio(
+            "Choose response length:",
+            ["Concise", "Moderate", "Prolonged"],
+            index=1,  # Default to Moderate
+            help="Select how detailed you want the responses to be"
+        )
+        
+        st.markdown("---")
+        
+        # 4. User Context
+        st.header("👤 User Context")
         
         user_type = st.selectbox(
             "I am a:",
@@ -344,103 +384,48 @@ def main():
             ["Low", "Medium", "High"],
             help="How urgent is your medical question?"
         )
-        
-        # Show current status
-        st.markdown("---")
-        st.header("Current Status")
-        if st.session_state.vector_store:
-            st.success(f"📄 Document: {st.session_state.uploaded_file_name}")
-            st.info("Answers will be based on your uploaded document")
-        else:
-            st.info("💡 No document loaded - answers will be based on general medical knowledge")
-        
-        # Debug info (can be removed later)
-        if st.session_state.chat_history:
-            st.markdown("---")
-            st.header("Debug Info")
-            st.write(f"Chat history length: {len(st.session_state.chat_history)}")
-            with st.expander("View Chat History (Debug)", expanded=False):
-                for i, chat in enumerate(st.session_state.chat_history):
-                    st.write(f"**{i+1}. Q:** {chat['question']}")
-                    st.write(f"**A:** {chat['answer'][:100]}...")
-                    st.write("---")
     
     # Main chat interface
-    st.subheader("💬 Ask Your Medical Question")
-    
-    # Display chat history
-    if st.session_state.chat_history:
-        st.subheader("📝 Conversation History")
-        display_chat_history()
-        st.markdown("---")
-    
-    # Suggested questions
-    st.subheader("💡 Suggested Questions")
-    suggested_questions = get_suggested_questions()
-    
-    cols = st.columns(2)
-    for i, question in enumerate(suggested_questions):
-        with cols[i % 2]:
-            if st.button(question, key=f"suggestion_{i}", use_container_width=True):
-                with st.spinner("🤔 Thinking..."):
-                    response = generate_response(question, user_type, urgency)
-                    
-                    if response:
-                        # Add to chat history
-                        st.session_state.chat_history.append({
-                            'question': question,
-                            'answer': response
-                        })
+    # Sample questions
+    sample_questions = get_sample_questions()
+    if sample_questions:
+        st.subheader("💡 Sample Questions")
+        cols = st.columns(2)
+        for i, question in enumerate(sample_questions):
+            with cols[i % 2]:
+                if st.button(f"📊 {question}", key=f"sample_{i}", use_container_width=True):
+                    st.session_state.messages.append({"role": "user", "content": question})
+                    with st.spinner("Processing..."):
+                        response_data = process_message_response(question, user_type, urgency, style)
+                        if response_data:
+                            st.session_state.messages.append(response_data)
                         st.rerun()
-
-    st.markdown("---")
     
-    # Custom question input
-    st.subheader("✍️ Ask Your Own Question")
-    query = st.text_input(
-        "Type your question here:",
-        placeholder="e.g., What are the side effects of this medication?"
-    )
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
     
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        ask_button = st.button("Ask", type="primary")
-    with col2:
-        if st.button("Clear Conversation"):
-            st.session_state.chat_history = []
-            st.rerun()
-    
-    if ask_button and query.strip():
-        with st.spinner("🤔 Thinking..."):
-            response = generate_response(query, user_type, urgency)
-            
-            if response:
-                # Add to chat history
-                st.session_state.chat_history.append({
-                    'question': query,
-                    'answer': response
-                })
-                # Clear the input by rerunning
-                st.rerun()
-    
-    # Show latest response with disclaimer
-    if st.session_state.chat_history:
-        latest_chat = st.session_state.chat_history[-1]
+    # Chat input
+    if prompt := st.chat_input("What would you like to know?"):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
         
-        st.markdown("---")
-        st.subheader("📋 Latest Answer")
-        st.write(latest_chat['answer'])
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
         
-        # Add disclaimers
-        user_context, urgency_level = classify_user_context(user_type, urgency)
-        disclaimer = add_medical_disclaimers(urgency_level)
-        st.markdown(disclaimer)
-        
-        # Show source information
-        if st.session_state.vector_store:
-            st.info(f"💡 Answer based on your document: {st.session_state.uploaded_file_name}")
-        else:
-            st.info("💡 Answer based on general medical knowledge")
+        # Generate and display assistant response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response_data = process_message_response(prompt, user_type, urgency, style)
+                if response_data:
+                    st.session_state.messages.append(response_data)
+                    st.markdown(response_data["content"])
+                else:
+                    error_msg = "Sorry, I encountered an error while processing your question. Please try again."
+                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                    st.markdown(error_msg)
 
 if __name__ == "__main__":
     main()
