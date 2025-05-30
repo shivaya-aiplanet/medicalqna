@@ -150,9 +150,9 @@ def classify_user_context(user_type, urgency):
 def get_style_instruction(style):
     """Get style instruction based on user selection"""
     style_map = {
-        "Concise": "Provide a brief, concise answer focusing on key points only. Keep the response short and direct.",
-        "Moderate": "Provide a balanced response with adequate detail and explanation while maintaining clarity.",
-        "Prolonged": "Provide a comprehensive, detailed response with thorough explanations, background information, and examples where appropriate."
+        "Concise": "Provide a very brief, concise answer with only the most essential information in 1-2 sentences. No explanations or elaborations.",
+        "Moderate": "Provide a balanced response with moderate detail and clear explanations. Use 3-5 sentences with key information and some context.",
+        "Prolonged": "Provide a comprehensive, detailed response with extensive explanations, background information, multiple examples, step-by-step breakdowns, related considerations, and thorough coverage of all relevant aspects. Use multiple paragraphs and elaborate on each point extensively."
     }
     return style_map.get(style, style_map["Moderate"])
 
@@ -229,24 +229,15 @@ def generate_response(query, user_type, urgency, style):
         st.error(f"Error generating response: {str(e)}")
         return None
 
-def add_medical_disclaimers(urgency_level):
-    """Add appropriate medical disclaimers"""
-    
-    base_disclaimer = """
-    **⚠️ Medical Disclaimer:**
-    This information is for educational purposes only and should not replace professional medical advice. 
-    Always consult with qualified healthcare professionals for medical concerns.
-    """
-    
+def add_urgent_notice(urgency_level):
+    """Add urgent notice if needed"""
     if urgency_level == "urgent_medical_concern":
-        urgent_disclaimer = """
+        return """
         **🚨 URGENT NOTICE:**
         This appears to be a potentially urgent medical situation. 
         Please seek immediate medical attention or contact emergency services.
         """
-        return urgent_disclaimer + base_disclaimer
-    
-    return base_disclaimer
+    return ""
 
 def clear_vector_store():
     """Clear the current vector store and collection"""
@@ -266,32 +257,70 @@ def clear_vector_store():
     except Exception as e:
         st.error(f"Error clearing vector store: {str(e)}")
 
-def get_sample_questions():
-    """Get sample questions based on document availability"""
-    if st.session_state.vector_store:
+def get_document_based_questions():
+    """Generate contextual questions based on uploaded document content"""
+    if not st.session_state.vector_store:
+        return []
+    
+    # Try to get document context to generate relevant questions
+    try:
+        # Use the retriever to get some sample content
+        retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 2})
+        sample_docs = retriever.get_relevant_documents("main topic summary key information")
+        
+        if sample_docs:
+            # Generate context-aware questions based on document content
+            doc_content = " ".join([doc.page_content[:200] for doc in sample_docs])
+            
+            # Simple keyword-based question generation
+            questions = []
+            
+            # Always include these generic document questions
+            questions.extend([
+                "What is the main topic of this document?",
+                "Can you summarize the key points?"
+            ])
+            
+            # Add specific questions based on content keywords
+            content_lower = doc_content.lower()
+            
+            if any(word in content_lower for word in ['treatment', 'therapy', 'medication', 'drug']):
+                questions.append("What treatments or medications are mentioned?")
+            
+            if any(word in content_lower for word in ['symptom', 'sign', 'condition', 'disease']):
+                questions.append("What symptoms or conditions are discussed?")
+            
+            if any(word in content_lower for word in ['procedure', 'surgery', 'operation']):
+                questions.append("What procedures are described?")
+            
+            if any(word in content_lower for word in ['risk', 'complication', 'side effect']):
+                questions.append("What risks or complications are mentioned?")
+            
+            return questions[:4]  # Return max 4 questions
+            
+    except Exception as e:
+        # Fallback to generic document questions
         return [
-            "What is the main topic discussed in this document?",
-            "Can you summarize the key findings or recommendations?",
-            "What are the important symptoms or conditions mentioned?",
-            "Are there any treatment options or medications discussed?"
+            "What is the main topic of this document?",
+            "Can you summarize the key points?",
+            "What important information should I know?",
+            "Are there any specific recommendations?"
         ]
-    else:
-        return [
-            "What are the common symptoms of diabetes?",
-            "How can I maintain good heart health?",
-            "What should I know about high blood pressure?",
-            "When should I see a doctor for persistent headaches?"
-        ]
+    
+    return []
 
 def process_message_response(query, user_type, urgency, style):
     """Process and return message response data"""
     response = generate_response(query, user_type, urgency, style)
     if response:
         user_context, urgency_level = classify_user_context(user_type, urgency)
-        disclaimer = add_medical_disclaimers(urgency_level)
         
-        # Combine response with disclaimer
-        full_response = response + "\n\n" + disclaimer
+        # Add urgent notice if needed (only for urgent cases)
+        urgent_notice = add_urgent_notice(urgency_level)
+        full_response = response
+        
+        if urgent_notice:
+            full_response = urgent_notice + "\n\n" + full_response
         
         # Add source information
         if st.session_state.vector_store:
@@ -384,22 +413,36 @@ def main():
             ["Low", "Medium", "High"],
             help="How urgent is your medical question?"
         )
+        
+        # Medical Disclaimer at bottom of sidebar
+        st.markdown("---")
+        st.markdown(
+            """
+            <div style='background-color: #f0f2f6; padding: 10px; border-radius: 5px; font-size: 12px;'>
+            ⚠️ <strong>Medical Disclaimer:</strong><br>
+            This information is for educational purposes only and should not replace professional medical advice. 
+            Always consult with qualified healthcare professionals for medical concerns.
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
     
     # Main chat interface
-    # Sample questions
-    sample_questions = get_sample_questions()
-    if sample_questions:
-        st.subheader("💡 Sample Questions")
-        cols = st.columns(2)
-        for i, question in enumerate(sample_questions):
-            with cols[i % 2]:
-                if st.button(f"📊 {question}", key=f"sample_{i}", use_container_width=True):
-                    st.session_state.messages.append({"role": "user", "content": question})
-                    with st.spinner("Processing..."):
-                        response_data = process_message_response(question, user_type, urgency, style)
-                        if response_data:
-                            st.session_state.messages.append(response_data)
-                        st.rerun()
+    # Sample questions (only if document is uploaded)
+    if st.session_state.vector_store:
+        sample_questions = get_document_based_questions()
+        if sample_questions:
+            st.subheader("💡 Sample Questions")
+            cols = st.columns(2)
+            for i, question in enumerate(sample_questions):
+                with cols[i % 2]:
+                    if st.button(f"📊 {question}", key=f"sample_{i}", use_container_width=True):
+                        st.session_state.messages.append({"role": "user", "content": question})
+                        with st.spinner("Processing..."):
+                            response_data = process_message_response(question, user_type, urgency, style)
+                            if response_data:
+                                st.session_state.messages.append(response_data)
+                            st.rerun()
     
     # Display chat messages
     for message in st.session_state.messages:
